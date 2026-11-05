@@ -131,11 +131,12 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     }
     if (!any) { pthread_mutex_unlock(&g_efd_mu); for (uint64_t i = 0; i < n; i++) p[i].revents = 0; return sk_idle(ms); }
     int ready;
-    for (int64_t left = ms;;) {
+    for (int64_t left = ms < 0 ? 100 : ms;;) {
         ready = 0;
         for (uint64_t i = 0; i < n; i++) { int k = p[i].fd >= 0 ? efd_slot(p[i].fd) : -1; p[i].revents = (int16_t)(k >= 0 ? efd_ready(k, p[i].events) : 0); ready += p[i].revents != 0; }
-        if (ready || !left || !efd_wait(left)) break;   // ready, a zero timeout, or a slice passed with no change
-        if (left > 0) left = left > 100 ? left - 100 : 0;
+        if (ready || !left) break;   // ready, a zero timeout, or the timeout passed with no change
+        efd_wait(left);
+        left = left > 100 ? left - 100 : 0;
     }
     pthread_mutex_unlock(&g_efd_mu);
     return ready;

@@ -561,8 +561,16 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     k.fsfn = (__bridge void *)(ts ? ts->fn : ms->fn);   // with ms in the key's vertex place: the task shader is the third of the pipeline's functions
     os_unfair_lock_lock(&g_pso_mtk_lock); id ps = hm_get_id(&g_pso_mtk, &k);
+    if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mtk_building); }
     os_unfair_lock_unlock(&g_pso_mtk_lock);
     if (ps) return ps == NSNull.null || ps == g_pso_mtk_building ? nil : ps;
+    const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-";
+    if (ms->fn.functionType != MTLFunctionTypeMesh || (ts && ts->fn.functionType != MTLFunctionTypeObject)) {
+        MLOG("[RED] task / mesh pipeline: task %s (type %lu) mesh %s (type %lu) fragment %s is not an object / mesh function pair",
+             tk, (unsigned long)(ts ? ts->fn.functionType : 0), mk, (unsigned long)ms->fn.functionType, fk);
+        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &k, NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
+        return nil;
+    }
     MTLRenderPipelineDescriptor *d = pso_desc(&k, ms, fs, nil, 0);
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
@@ -570,12 +578,14 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
-    const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-";
-    NSError *e = nil; uint64_t t0 = bp_now();
-    id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
-    MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
-    os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &k, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
-    return p;
+    pso_key kk = k;
+    dispatch_async(pp_bg_queue(), ^{
+        NSError *e = nil; uint64_t t0 = bp_now();
+        id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
+        MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
+        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
+    });
+    return nil;
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;

@@ -1037,7 +1037,7 @@ def build_keys(want, locations, pairs):
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
 
 def vs_pad(key, src):
-    """Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
+    """Give a vertex or mesh shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
     Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
@@ -1047,8 +1047,16 @@ def vs_pad(key, src):
         if os.path.exists(fn):
             with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
+    if not miss: return src, []
+    mi = src.find('struct dm_vertex_t {\n')
+    if mi >= 0:
+        mj = src.find('};\n', mi)
+        if mj < 0 or 'dm_out.set_vertex(n, v);' not in src: return src, []
+        src = src[:mj] + ''.join(f'    float4 dm_pad{l} [[user(locn{l})]];\n' for l in miss) + src[mj:]
+        init = ''.join(f'        v.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);\n' for l in miss)
+        return src.replace('        dm_out.set_vertex(n, v);\n', init + '        dm_out.set_vertex(n, v);\n'), miss
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
-    if not miss or i < 0 or j < 0 or k < 0: return src, []
+    if i < 0 or j < 0 or k < 0: return src, []
     src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
     k = src.find('main0_out out = {};') + len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
@@ -1452,7 +1460,7 @@ def finish(key, w, j, c1):
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
-    if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
+    if (j['stage'] == 'vs' or (mesh and mesh['kind'] == 'ms')) and PAIRS.get(key):   # outputs the pixel shader reads but the vertex or mesh shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False

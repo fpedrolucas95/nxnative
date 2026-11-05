@@ -30,6 +30,7 @@ dm/tools/usage.py	-	the usage manifests
 dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
 dm/tools/impact_map.tsv	-	this map
 dm/tools/lint_python_baseline.tsv	-	the lint baseline
+dm/tools/lint_c_baseline.tsv	-	the C lint baseline
 dm/gfx/hle_nv.c	hle:_ZN2nv*	graphics-library lifecycle and memory-query exports
 dm/gfx/nvn/*	api:nvn	NVN on Metal: every NVN game
 dm/gfx/msl/*	*:*	the host's own Metal shaders (clears, copies, the present, the GPU deswizzle, the OpenGL clear quad): every game
@@ -114,6 +115,7 @@ dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
 dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
 dm/gfx/tools/vbf.py	shader:stage:*	Virtuos archive input to shader scanning
 dm/gfx/tools/dmsh_mesh.py	shader:stage:gs	passthrough geometry composed into a mesh shader
+dm/gfx/tools/dmsh_meshstage.py	shader:stage:*	task and mesh shader stage lowering
 dm/host/hle_fpslock.c	present:*	build-gated engine frame limits and dynamic resolution
 dm/host/hle_uecvar.c	present:*	Unreal console variables found by name; the texture pool (profile ue_texture_pool)
 dm/gfx/tools/mvgl.py	api:gl	MVGL archive input to OpenGL shader scanning

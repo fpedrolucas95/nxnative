@@ -29,9 +29,9 @@ def is_stage(ctl):
 
 
 def sph_outputs(sph):
-    """The components an SPH's OMAP enables, in the order of the attribute area: [(None, c)] for the position's (byte 0x35, bits 4..7), then [(n, c)] for generic attribute n's
-    (bytes 0x36 on, a nibble an attribute, bit c its component)."""
-    out = [(None, c) for c in range(4) if sph[0x35] >> (4 + c) & 1]
+    """The components an SPH's OMAP enables, in the order of the attribute area: [(None, c)] for the position's (byte 0x35, bits 4..7), [('psiz', 0)] for the point size's
+    (byte 0x35, bit 3), then [(n, c)] for generic attribute n's (bytes 0x36 on, a nibble an attribute, bit c its component)."""
+    out = [(None, c) for c in range(4) if sph[0x35] >> (4 + c) & 1] + ([('psiz', 0)] if sph[0x35] & 8 else [])
     for n in range(32):
         out += [(n, c) for c in range(4) if sph[0x36 + n // 2] >> (4 * (n % 2) + c) & 1]
     return out
@@ -39,7 +39,7 @@ def sph_outputs(sph):
 
 def info(ctl, area):
     """A task or mesh shader's facts from its control section and its whole code area (the SPH, the instructions, a mesh shader's second SPH): +0x58 its workgroup's threads, +0x5a its
-    payload's bytes, +0x5e whether a mesh shader has a task, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive SPH where +0x68 bit 7 is set."""
+    payload's bytes, +0x5e whether a mesh shader has a task, +0x5f whether it outputs points, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive SPH where +0x68 bit 7 is set."""
     kind = is_stage(ctl)
     threads, payload = struct.unpack_from('<2H', ctl, 0x58)
     out = {'kind': kind, 'threads': threads, 'payload': payload}
@@ -47,7 +47,7 @@ def info(ctl, area):
         max_v, max_p = struct.unpack_from('<2H', ctl, 0x60)
         at = struct.unpack_from('<I', ctl, 0x64)[0] if ctl[0x68] & 0x80 else 0
         prim = sph_outputs(area[at:at + 0x80]) if at else []
-        out.update(task=bool(ctl[0x5e]), max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if c[0] is not None])
+        out.update(task=bool(ctl[0x5e]), points=ctl[0x5f] == 1, max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if isinstance(c[0], int)])
     return out
 
 
@@ -58,7 +58,8 @@ def memory(i):
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
     blocks = max(max(i['max_v'], i['max_p'], 1) + BLOCK - 1, 0) // BLOCK
     prim = out + blocks * max(len(i['vertex']) + len(i['primitive']), 1) * BLOCK * 4
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+    idx = 1 if i.get('points') else 3
+    return [WORKGROUP, INPUT, out, prim], prim + (4 + idx * max(i['max_p'], 1) + 3 & ~3)
 
 
 def own_shared(code):
@@ -136,11 +137,16 @@ def to_stage(msl, i):
     stride = max(len(vertex) + len(primitive), 1) * BLOCK   # words of an attribute block
     word = lambda comps, n: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
     vm, pm = _members(vertex), {n: [c + len(vertex) if c is not None else None for c in v] for n, v in _members(primitive).items()}
-    head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' + ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if n is not None) + '};\n' +
+    topo = 'point' if i.get('points') else 'triangle'
+    nidx = 'np' if i.get('points') else 'np * 3u'
+    head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' +
+             ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
+             ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if isinstance(n, int)) + '};\n' +
              ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
-             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::triangle>;\n')
+             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::{topo}>;\n')
     block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {stride}u + {v} % {BLOCK}u'
-    sets = ''.join(f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c, n))};\n' for n, c in vm.items())
+    sets = ''.join(f'        v.point_size = as_type<float>({word(c, n)[0]});\n' if n == 'psiz' else
+                   f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c, n))};\n' for n, c in vm.items())
     psets = ''.join(f'        p.p{n} = {_component(True, word(c, n))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 
@@ -157,5 +163,5 @@ def to_stage(msl, i):
                 ('        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n' if gl else '') +
                 '        dm_out.set_vertex(n, v);\n    }\n' +
                 (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
-                f'    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
+                f'    for (uint n = {lid}; n < {nidx}; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
     return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)
