@@ -70,6 +70,9 @@ KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
+# An NVN2 BNSH program has stage slots past those six: 7 holds the task shader and 8 the mesh shader (The Legend of Zelda: Ocarina of Time's Model and Foliage .bfsha,
+# 1,699 task and 1,739 mesh shaders; read from the six slots alone, every mesh-shaded draw was missing from the map and dropped). Slot 6 has not been seen used
+NVN2_SLOTS = [None, None, None]
 SPH_STAGE = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}
 def sph_stage(code):
     """A graphics code area's stage from its SPH word 0: shader type in bits 10..13. Catherine: Full Body's GLSLC (SDK 8.2.1, GPU code version 1.15) writes 0 there in every vertex shader
@@ -152,10 +155,18 @@ def bnsh_shaders(d, base, label):
     for v in range(nvar):
         prog = field(d, '<Q', base + pvar + 0x40 * v + 0x10, f'{where} variation {v}')[0]
         if not prog: continue
-        for si, st in enumerate(STAGES):
+        for si in range(len(STAGES) + len(NVN2_SLOTS)):
+            st = STAGES[si] if si < len(STAGES) else NVN2_SLOTS[si - len(STAGES)]
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
-            pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            if st is not None:
+                pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            else:   # past the six NVN stages: a slot only an NVN2 program has, taken when it holds an NVN2 control section (an NVN program's words there are not stage records)
+                if base + sc + 0x20 > len(d): continue
+                pctl, pcode, ncode, nctl = struct.unpack_from('<QQII', d, base + sc + 8)
+                if not (0x48 <= nctl < 0x10000 and base + pctl + nctl <= len(d) and base + pcode + ncode <= len(d)) or not nvn2_ctl(d[base + pctl:base + pctl + nctl]): continue
+                st = nvn2_stage(d[base + pctl:base + pctl + nctl], d[base + pcode:base + pcode + ncode])
+                if st not in ('ts', 'ms'): red(f'{where} variation {v}: NVN2 stage slot {si} holds a {st} shader, not a task or mesh shader')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
@@ -237,39 +248,37 @@ def ndsr_shaders(d, label):
         elif st == 'ps' and prog: BAHS_VAR[prog] = BAHS_VAR[where] = f'{label}#NDSR#{prog.rsplit("@", 1)[1]}'; prog = None
     return out
 
-def rla1_shaders(d, label):
-    """An RLA1 container (the second part of an NDVE file, ndve_shaders): blobs listed by a footer at the end, [u32 footer length][u32 count]{u32 ID, u32 offset, u32 length}×count
-    [u32 footer offset]'RLA1', where the footer length counts everything before the magic. A blob is u32 shader count, u32 data count, {u32 offset, u32 length}×data (the network's
-    fp16 weights), then {u32 control offset, u32 control length, u32 code length, u32 0}×shaders, offsets from the blob's start, each code area right after its control section
-    (Ocarina of Time's 4 blobs: 9, 9, 1 and 1 NVN2 compute shaders)"""
-    if len(d) < 0x14 or d[-4:] != b'1ALR': return []   # the magic is the u32 'RLA1', so its bytes run backwards
-    foot = struct.unpack_from('<I', d, len(d) - 8)[0]
-    if foot + 0x10 > len(d): red(f'{label}: RLA1 footer out of bounds')
-    size, n = struct.unpack_from('<2I', d, foot)
-    if foot + size + 4 != len(d) or size != 12 + 12 * n: red(f'{label}: malformed RLA1 footer (length {size:#x}, {n} blobs)')
-    out = []
-    for _, bo, bs in struct.iter_unpack('<3I', d[foot + 8:foot + 8 + 12 * n]):
-        if bo + bs > foot or bs < 8: red(f'{label}: RLA1 blob at {bo:#x} out of bounds')
-        b = d[bo:bo + bs]
-        ns, nd = struct.unpack_from('<2I', b)
-        p = 8 + 8 * nd
-        if p + 16 * ns > bs: red(f'{label}: RLA1 blob at {bo:#x}: {ns} shader records past its end')
-        for co, cl, kl, _ in struct.iter_unpack('<4I', b[p:p + 16 * ns]):
-            ctl, code = b[co:co + cl], b[co + cl:co + cl + kl]
-            if co + cl + kl > bs or not nvn2_ctl(ctl): red(f'{label}: RLA1 blob at {bo:#x}: no NVN2 control section at {co:#x}')
-            st = nvn2_stage(ctl, code)
-            if st is None or check(label, st, ctl, code): red(f'{label}: RLA1 blob at {bo:#x}: the shader at {co:#x} does not match its control section')
-            out.append((f'{label}#RLA1@{bo + co:#x}', st, ctl, code))
-    return out
-
 def ndve_shaders(d, label):
-    """An NDVE file (Ocarina of Time's Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs: the upscaler of its movies): a header, then an NDSR pack (ndsr_shaders) and an RLA1 container (rla1_shaders),
-    their lengths at +0xc and +0x10; the header is what is left (0x28 bytes in version 5, +4)"""
-    if len(d) < 0x28: return []
-    a, b = struct.unpack_from('<2I', d, 0xc)
-    h = len(d) - a - b
-    if h < 0x14 or d[h:h + 4] != b'NDSR': red(f'{label}: NDVE header: an NDSR pack of {a:#x} bytes and an RLA1 container of {b:#x} do not fill the file')
-    return ndsr_shaders(d[h:h + a], f'{label}#NDVE') + rla1_shaders(d[h + a:], f'{label}#NDVE')
+    """The movie library's video engine pack (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs, The Legend of Zelda: Ocarina of Time, SDK 22: 'NDVE'): NVN2 programs laid out raw, each a 0x48-byte
+    control section (version 0x14 at +8; the key takes its first 0x48 bytes) whose code area lies at the section plus +0x30 and is +0x44 bytes long; sections with 0x11 at +8 have no
+    code area of their own (+0x30 0). The section runs up to its code area and has the NVN2 layout: stage byte +0x56 (5: compute), thread group +0x58, shared memory +0x64. All 20 are
+    compute shaders, the decoder's colour conversion among them (the title movie's dispatch found no shader, and the title screen stood on black behind its logo).
+    The sections are found by their magic and checked like any NVN2 section. Two more programs (0x11 at +8, compute, one dispatched at the title) are named only by the 'NDSR' record
+    table in the header (at +0x28): records as in agl's pack (ndsr_shaders: control offset, control length << 4 | type, code offset, code length / 16 << 8 | type; offsets from the 'NDSR'),
+    but among other records of other sizes, so the table is read word by word for records that point at an NVN2 control section and whose code length matches the section's +0x44"""
+    if d[:4] != b'NDVE': return []
+    out = []
+    t = d.find(b'NDSR', 0, 0x100)
+    for o in range(t + 4 if t >= 0 else len(d), min(len(d) - 16, t + 0x1000) if t >= 0 else 0, 4):
+        c, cl, k, kl = struct.unpack_from('<4I', d, o)
+        if cl & 0xf not in (0, 3, 6) or kl & 0xff != 7 or not 0x48 <= cl >> 4 < 0x10000: continue
+        c, k, n = t + c, t + k, (kl >> 8) * 16
+        if c + (cl >> 4) > len(d) or k + n > len(d) or not nvn2_ctl(d[c:c + NVN2_KEY_CTL]) or struct.unpack_from('<I', d, c + 0x44)[0] != n: continue
+        ctl, code = d[c:c + (cl >> 4)], d[k:k + n]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        out.append((f'{label}#NDVE#NDSR@{c:#x}', st, ctl, code))
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + NVN2_KEY_CTL > len(d) or not nvn2_ctl(d[c:c + NVN2_KEY_CTL]) or struct.unpack_from('<I', d, c + 8)[0] != 0x14: continue
+        rel, n = struct.unpack_from('<Q', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+        if not rel or c + rel + n > len(d) or not n: continue
+        if rel < 0x68: continue   # the section must reach its thread group and shared memory
+        ctl, code = d[c:c + rel], d[c + rel:c + rel + n]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
+    return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
 def bahs_variations(d, label, entries):

@@ -1,10 +1,6 @@
-"""NDSR packs are lists of 8-byte items, and NDVE files hold an NDSR pack and an RLA1 container of NVN2 compute shaders. Synthetic bytes only."""
-import contextlib
-import io
+"""NDSR packs are lists of 8-byte items (ndsr_shaders). Synthetic bytes only; NDVE files are dm/gfx/tests/test_ndve.py's."""
 import struct
-import tempfile
 import unittest
-from pathlib import Path
 
 from dm.tools.tests.test_split_gzip import ss
 
@@ -37,26 +33,6 @@ def ndsr(shaders, data_between):
     return bytes(blob)
 
 
-def rla1(blobs):
-    """An RLA1 container: each blob {shader count, 1 data block, (offset, length), shader records}, code after each control section, and the footer that lists the blobs"""
-    out, index = bytearray(), []
-    for shaders in blobs:
-        start = len(out)
-        head = 8 + 8 + 16 * len(shaders)
-        weights = bytes(0x20)
-        b = bytearray(struct.pack('<2I', len(shaders), 1) + struct.pack('<2I', head, len(weights)) + bytes(16 * len(shaders)) + weights)
-        for i, (ctl, code) in enumerate(shaders):
-            struct.pack_into('<4I', b, 16 + 16 * i, len(b), len(ctl), len(code), 0); b += ctl + code
-        out += b; index.append((len(index), start, len(b)))
-    foot = len(out)
-    out += struct.pack('<2I', 12 + 12 * len(index), len(index)) + b''.join(struct.pack('<3I', *e) for e in index) + struct.pack('<I', foot) + b'1ALR'
-    return bytes(out)
-
-
-def ndve(pack, container):
-    return b'NDVE' + struct.pack('<2HII', 5, 0xff0, 0, len(pack)) + struct.pack('<I', len(container)) + bytes(0x14) + pack + container
-
-
 class NdsrItems(unittest.TestCase):
     def test_odd_data_items_keep_every_shader(self):
         # one data item between the two shaders shifts the second off a 16-byte record grid; the item walk still pairs each control item with the code item after it
@@ -68,29 +44,6 @@ class NdsrItems(unittest.TestCase):
         shaders = [nvn2(1), nvn2(2), nvn2(3)]
         found = ss.ndsr_shaders(ndsr(shaders, 0), 'p')
         self.assertEqual([code for *_, code in found], [s[1] for s in shaders])
-
-
-class Ndve(unittest.TestCase):
-    def scan(self, data, name='Movie/Ndve/Ndve-Nvn2-vid.dat'):
-        with tempfile.TemporaryDirectory() as t, contextlib.redirect_stdout(io.StringIO()) as log:
-            path = Path(t) / 'source'; path.write_bytes(data)
-            result = ss.scan_file((str(path), name))
-        return result, log.getvalue()
-
-    def test_both_parts_found_through_the_prefilter(self):
-        upscaler = [nvn2(1), nvn2(2)]
-        blobs = [[nvn2(3, 0x300, 0x1970), nvn2(4)], [nvn2(5, 0x80, 0x768)]]
-        (_, keys, _, extra), log = self.scan(ndve(ndsr(upscaler, 1), rla1(blobs)))
-        self.assertEqual(log, ''); self.assertEqual(extra, {})
-        want = {ss.skey(ctl, code) for ctl, code in upscaler + [s for b in blobs for s in b]}
-        self.assertEqual(set(keys), want)
-        self.assertEqual(sum('#NDVE#RLA1@' in v[0] for v in keys.values()), 3)
-
-    def test_sizes_that_do_not_fill_the_file_are_red(self):
-        data = bytearray(ndve(ndsr([nvn2(1)], 0), rla1([[nvn2(2)]])))
-        struct.pack_into('<I', data, 0x10, 0x40)   # the RLA1 length
-        (_, keys, _, extra), log = self.scan(bytes(data))
-        self.assertEqual(keys, {}); self.assertIn('NDVE header', log); self.assertEqual(extra[0], 'unreadable')
 
 
 if __name__ == '__main__':

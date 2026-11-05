@@ -140,10 +140,12 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
 
-    def test_no_profile_refused(self):
+    def test_no_profile_surveyed_from_the_dump(self):   # no prod.keys and no nx_extract: the survey reads the dump's own ExeFS (this stub's NPDM is not a 64-bit program, so it stops there)
         d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'has none'):
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), \
+             mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract for a dump')), self.assertRaisesRegex(nsp.BuildError, '32-bit ARM program'):
             nsp.main(nsp.parse_args([str(d)]))
+        self.assertTrue((d / '0400000000000000_survey/extract/ExeFS/main.npdm').is_file())
 
 
 if __name__ == '__main__':
