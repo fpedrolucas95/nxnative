@@ -324,6 +324,26 @@ class OcarinaOfTime(Translated):
                                  r'int (?P<r>_\d+) = _\d+\((?P=lo), (?P=hi), (?P=e), (?P=v), [^;]*\);\s+int (?P<rd>_\d+) = (?P=r);\s+_\d+\[8\] = uint\((?P=rd)\);')
         self.assertNotRegex(kernel, r'\? 1u : 0u|\? 1 : 0')
 
+    # RED.E.ADD.F32.FTZ.RN [UR4 + 0x8], R5: the game's encoding (Foliage pixel shader 0d6006b9f413a197 +0x8910 has [UR4 + 0x80], R51), type 3 at 73..76, ADD at 87..89; UR4 here is
+    # storage slot 0 from c0 (ULDC.64 UR4, c[0][0x40], RawGlobal's job layout)
+    RED_F32 = (0x000fe8000c10e704, 0x00000805ff00798e)
+    ULDC_UR4 = (0x000fe40000000a00, 0x0000100000047ab9)
+
+    def red_f32(self, value=0x3f800000):
+        full = self.translate(inst(*self.ULDC_UR4) + mov(5, value) + inst(*self.RED_F32) + inst(*EXIT), nvn2_cs=[3, 1, 0, 0x50, 0])
+        return full[full.index('kernel void'):]
+
+    def test_red_f32_adds_through_a_compare_and_swap_loop(self):   # it was dropped ("Invalid reduction type: F32FtzRn"): no atomic at all
+        kernel = self.red_f32()
+        # at byte 8 of storage slot 0: a fresh atomic read of the word at each try, the float sum of its bits and R5 (1.0), a swap of the bits, and again while the word changed
+        self.assertRegex(kernel, r'do\s*\{\s*uint (?P<w>_\d+) = atomic_fetch_or_explicit\(\(device atomic_uint\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[2\], 0u')
+        self.assertRegex(kernel, r'spvFAdd\(_\d+, _\d+\)')
+        self.assertRegex(kernel, r'atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[2\]')
+        self.assertRegex(kernel, r'\}\s*while \(_\d+\);\s*\}\s*$')
+
+    def test_red_f32_flushes_denormals(self):   # FTZ: the operands and the sum compare against the smallest normal
+        self.assertEqual(len(re.findall(r'abs\([^;]*\);\s*bool _\d+ = _\d+ < 1\.17549435', self.red_f32())), 3)
+
 
 def ctrl(wb=7, wait=0, stall=2):   # an instruction's control bits, high word: stall, yield, write barrier wb, no read barrier, waiting on the barriers in wait
     return (stall | 1 << 4 | wb << 5 | 7 << 8 | wait << 11) << 41
