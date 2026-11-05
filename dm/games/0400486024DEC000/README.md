@@ -6,6 +6,46 @@ The Switch 2 base dump reaches its title screen on the Mac. VideoToolbox decodes
 
 SDK 22.2.8, NVN API 231.40, with Nintendo's sead, agl and gsys. The three loaded modules are `main`, `subsdk0` (NintendoSDK_movie), and `sdk`. The NPDM declares 48 MiB of system resources. Startup requests a 6.20 GiB heap, which fits in the profile's 12 GiB reservation with the stack and alias regions. The registered build is the supplied base dump (`v0`).
 
+## Recovered MacBook Air M4 settings
+
+The November 5, 2026 v131072 session used the settings in [mac.env](mac.env).
+They are runtime settings, separate from the host's general defaults and from
+generated build files. Build with that file and use the supplied runner afterward:
+
+```sh
+# PYTHON is the shared tool venv's Python; NUP is the original package path.
+"$PYTHON" scripts/build_ipa_from_nsp.py "$NUP" --platform mac \
+  --env-file "$PWD/dm/games/0400486024DEC000/mac.env"
+python3 scripts/play_oot.py "$(dirname "$NUP")/0400486024DEC000_build"
+```
+
+`play_oot.py --print-command <build folder>` shows the exact environment without
+building or launching. It uses a sibling `0400486024DEC000_saves/save` when present
+(the saves preserved during cleanup), otherwise the build's `run/save`. An explicit
+`--save <folder>` overrides that choice. Saves are not overwritten or recloned.
+
+| Setting | Recovered value | Evidence and limit |
+|---|---|---|
+| `DM_RENDER_SCALE` | `0.5` | Runs 16–19 logged `3D views rendered at 0.50`; the user reported improved frame rate. |
+| `DM_UPSCALER` | `metalfx` | The logs identify the 22 NDSR shaders replaced by MetalFX. |
+| `DM_NVN_ENC_THREAD` | `1` | The logs confirm the encode thread; its indirect-mesh abort was fixed before run 16. |
+| `DM_NVN_POOL_HEAP` | `0` | The user reported that run 17 removed the fog/DOF blocks; run 18 with mode 2 retained them. This is a visual workaround. |
+| `DM_NVN_RES_LIMIT_MB` | `11300` | The guard used in those runs. Run 17 reached 11,992 MB of residency and stopped; disabling heaps did not solve memory pressure. |
+| `DM_OPMODE` | `1` | Docked, as in the later runs. The earlier handheld experiment was reported slower. |
+
+The unsuccessful `DM_NVN_GMEM_RES=0` and `DM_NVN_TEX_MIP_SKIP=1` experiments are
+not restored: the preset explicitly selects their normal defaults, 1 and 0.
+The final HMMA optimizer correction and same-format heap restriction were saved
+in source and translator chain `72458830f2f7`, but their shader rebuild was
+interrupted before a completed gameplay test. The native-movie-renderer cut at
+`main+0x3b5f51c` was proposed, deliberately not applied, and remains unapplied.
+Missing textures, foliage speed, DOF aliasing and heavy-scene GPU cost remain open;
+this preset does not establish a fully correct or stable configuration.
+
+Build outputs, the compiled shader image and pipeline caches were removed during
+cleanup. The source corrections, runtime preset and saves survive; a playable
+installation requires rebuilding those generated files from the NUP.
+
 ## Mac dry run
 
 Use the rewritten `patched_v0` and the original extracted `base/romfs`. Build the host with `make -C dm/host GAME=0400486024DEC000` and use the [Mac shader build](../../../docs/development.md#build-by-hand-mac). From the repository, set `DUMP` to the folder containing `base` and `WORK` to the build and run workspace beside it.
@@ -36,9 +76,9 @@ For a run past the opening, copy the committed save folder to the new run's `DM_
 - Mesh-shaded models were missing, among them the door of Link's house: the split read six stage slots of each BNSH program, and NVN2 keeps [task and mesh shaders in slots 7 and 8](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-nvn2-bnsh-program-slots-7-and-8) (resolved). The new split adds 491 mesh and 17 task shaders to the map, 53 of the 54 keys the Kokiri Forest scene had asked for. 511 of their 520 build; the door renders.
 - Kokiri Forest ran at about 20 fps with the GPU two-thirds idle: the [bindless pool table was rebuilt for every registration](../../../docs/reference/frame-rate.md#a-bindless-pool-table-rebuilt-for-every-registration), and about 12,000 descriptors of finalized texture objects churned the ghost ring (resolved). The frame is now 16–21 ms at the median on an Apple M5, submit 5–8 ms, and the GPU (14–21 ms) is the limit.
 - The first 3D scene exhausted Metal memory when [bindless pool walks churned finalized textures](../../../docs/reference/nvn-objects.md#a-bindless-pool-churns-finalized-textures-within-a-submission). On the Apple M5, the failing run reached 18,930 MiB of residency. With submission-local backing, residency was 7,946 MiB about ten seconds after the movie and 7,871 MiB at 35 seconds. The opening 3D scene and its subtitles presented, and the test host exited normally.
-- Loading the Link's house autosave hung the GPU in six of nine runs, with any upscaler: [more memory pools than the raw pool table had entries](../../../docs/reference/shaders.md#more-memory-pools-than-the-raw-pool-table-had-entries). The load made 4,097 to 4,522 pools. agl's task shaders `99280b7b8aae78df` and `47f9b38490dcf9a2` then read 0 for a range's ends and looped 2<sup>27</sup> times. Upstream issue #1265 saw the table pass 4,095 about eight minutes into gameplay, with floors missing. The table now grows with the pools; the fix needs a rebuilt app (new chain), and has not been run in the game yet.
+- Loading the Link's house autosave hung the GPU in six of nine runs, with any upscaler: [more memory pools than the raw pool table had entries](../../../docs/reference/shaders.md#more-memory-pools-than-the-raw-pool-table-had-entries). The load made 4,097 to 4,522 pools. agl's task shaders `99280b7b8aae78df` and `47f9b38490dcf9a2` then read 0 for a range's ends and looped 2<sup>27</sup> times. Upstream issue #1265 saw the table pass 4,095 about eight minutes into gameplay, with floors missing. The table now grows with the pools; the November 5 M4 runs reached 4,545 pools and continued to frame 7,800 with the fix.
 - Compute shaders `1f78730053feb036` and `e172bd7ec218ab8e` nested 259 brackets, past the Metal front end's 256, and were left out: [bracket nesting past the front end's 256](../../../docs/reference/shaders.md#bracket-nesting-past-the-front-ends-256) (resolved; both compile).
-- On v131072 Kokiri Forest's ground had no texture, the foliage twitched and bright areas were burnt out (MacBook Air M4, 16 GB). 34 shaders lost their [float atomic adds](../../../docs/reference/shaders.md#float-atomic-adds-dropped-f32ftzrn) in translation: 8 `TerrainGround` and 13 `Foliage` pixel shaders, and 13 agl `AglShader` programs. The adds translate on chain c0259cb667e3; whether each picture is fixed is not yet checked in the game.
+- On v131072 Kokiri Forest's ground had no texture, the foliage twitched and bright areas were burnt out (MacBook Air M4, 16 GB). 34 shaders lost their [float atomic adds](../../../docs/reference/shaders.md#float-atomic-adds-dropped-f32ftzrn) in translation: 8 `TerrainGround` and 13 `Foliage` pixel shaders, and 13 agl `AglShader` programs. The adds translate on chain c0259cb667e3; the November 5 capture showed the path and grass textured afterward. Exposure, other missing textures and foliage motion remained open.
 - The GPU ran out of an M4's 12 GB working set loading Kokiri Forest: one 305 MB virtual pool of transient render targets held 1,923 MB in 662 Metal textures, among them 85 depth textures at one offset (1306x1306 to 1920x1920). They can share [a placement heap per pool](../../../docs/reference/nvn-objects.md#textures-over-shared-storage-in-a-pools-placement-heap), one format at a time: with any format sharing, the depth of field's tile maps read other targets' bytes and the background blur showed blocks. Placement-heap sharing stays off by default (`DM_NVN_POOL_HEAP=0`); `1` and diagnostic mode `2` remain available for investigation. The exact DOF corruption mechanism and validation of the same-format restriction remain open.
 - `DM_NVN_ENC_THREAD=1` stopped at the first [indirect mesh draw](../../../docs/reference/rendering.md#indirect-mesh-draws-on-the-encode-thread) (resolved).
 - The NDVE and NDSR networks' HMMA read undefined fragments after [dead-code removal followed a producer with outputs still read](../../../docs/reference/shaders.md#dead-code-removal-following-a-producer-with-outputs-still-read) (chain 72458830f2f7; not yet checked in the game).
