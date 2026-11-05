@@ -212,6 +212,7 @@ static int merge_pads_left(GCController *gone) {
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_hidpad_only) return;
+    hidpad_yield_to_gc();
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {

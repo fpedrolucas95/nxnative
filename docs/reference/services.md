@@ -425,6 +425,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with the pointer over the game, a controller button or the keyboard hides it; moving the mouse shows it; over the title bar, or with another app active, it stays.
 - **Found on:** every game on the Mac (general); [PR #584](https://github.com/seedds/nxnative/pull/584).
 
+### Wired pads GameController claims but never lists
+
+- **Symptom:** on the Mac, a wired controller does nothing in the game and the log has no `controller '…' connected` line for it; it works with `DM_HID_PADS=only`. Seen with the 8BitDo Ultimate 2C Wired (`2dc8:301d`) over USB on macOS 27.
+- **Cause:** the raw HID reader (`pad_hid_mac.h`) skipped every device `+[GCController supportsHIDDevice:]` claims, so that GameController's controllers are not read twice. For this pad the call answers YES, but `GCController.controllers` stays empty (5 s in a probe that opens the device with IOHIDManager): neither source read it.
+- **Fix:** a claimed device is checked again 2 s after it appears (`HIDPAD_GC_GRACE_MS`). If GameController lists no controller with its HID product name (`vendorName`), the HID reader reads it (`controller '…': GameController supports it but listed no controller in 2000 ms, read directly (HID)`), marked as a fallback. If GameController lists it later, the fallback pad gives way on that connect (`hidpad_yield_to_gc`). `DM_HID_PADS=only` still reads every pad through HID.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, external provisional profile) on a MacBook Air M4: the pad connected as player 1 without `DM_HID_PADS`. A pad that GameController lists under a name other than its HID product name, more than 2 s after it appears, would be read by both until it disconnects; not seen.
+
 ### Mac display sleep during controller play
 
 - **Symptom:** the Mac dims or turns off its display and can reach the lock screen while the player is using a controller, in a window or in fullscreen.
