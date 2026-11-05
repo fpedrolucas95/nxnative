@@ -263,6 +263,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x987:
                         context.SetUsedFeature(FeatureFlags.LocalMemory);
                         break;
+                    case 0x923:
+                        if (gpuAccessor.QueryAmpereStageMemory() != null)
+                        {
+                            context.SetUsedFeature(FeatureFlags.SharedMemory);
+                        }
+                        break;
                     case 0x927:   // a task or mesh shader's stage memory lies in shared memory (InstEmitAmpereMem.AStageOut)
                     case 0x984:
                     case 0x388:
@@ -277,6 +283,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x98e:
                     case 0x9a8:
                     case 0x3a8:
+                    case 0x3a9:
                     case 0x9a9:
                     case 0x59f:
                     case 0xb9b:

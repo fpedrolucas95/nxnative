@@ -218,6 +218,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
                     }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        Operand addrLo = context.Copy(e0);
+                        Operand addrHi = context.Copy(e1);
+                        Operand val = context.Copy(value);
+                        Operand oldLocal = Local();
+                        Operand lblLoop = Label();
+                        Operand lblDone = Label();
+                        context.MarkLabel(lblLoop);
+                        context.Copy(oldLocal, context.Load(storageKind, addrLo, addrHi));
+                        Operand sum = context.FPAdd(oldLocal, val);
+                        Operand prev = context.AtomicCompareAndSwap(storageKind, addrLo, addrHi, oldLocal, sum);
+                        context.BranchIfTrue(lblDone, context.ICompareEqual(prev, oldLocal));
+                        context.Branch(lblLoop);
+                        context.MarkLabel(lblDone);
+                        res = oldLocal;
+                    }
                     else
                     {
                         context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");

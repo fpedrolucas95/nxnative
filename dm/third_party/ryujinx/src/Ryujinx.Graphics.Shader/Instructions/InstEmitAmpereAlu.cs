@@ -35,6 +35,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
             alu(0x03e, InstName.F2f, AF2fp);
+            alu(0x043, InstName.F2i, AF2ip);
             alu(0x030, InstName.Hadd2, AHadd2);
             alu(0x032, InstName.Hmul2, AHmul2);
             alu(0x031, InstName.Hfma2, AHfma2);
@@ -441,6 +442,43 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
+        }
+
+        // F2IP.U8.F32.NTZ Rd, a, b: b in Rd's low byte and a in byte 1, each rounded (78..80: nearest, floor, ceil, trunc) and clamped to 0..255; Rc is RZ.
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(72, 78) != 4 || x.Bits(80, 96) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex)
+            {
+                throw AFail(context, $"F2IP mode {x.Bits(72, 96):x6}");
+            }
+
+            (ASrc a, ASrc b) = ASecond(context, x, abs: false);
+            int rm = x.Bits(78, 80);
+
+            Operand Byte(ASrc s)
+            {
+                if (s.IsZeroReg)
+                {
+                    return Const(0);
+                }
+
+                Operand v = AFloat(context, s);
+
+                v = rm switch
+                {
+                    0 => context.FPRound(v),
+                    1 => context.FPFloor(v),
+                    2 => context.FPCeiling(v),
+                    _ => context.FPTruncate(v),
+                };
+
+                v = context.ConditionalSelect(context.IsNan(v), ConstF(0), v);
+                return context.FP32ConvertToU32(context.FPMinimum(context.FPMaximum(v, ConstF(0)), ConstF(255)));
+            }
+
+            ASet(context, x, context.BitwiseOr(Byte(b), context.ShiftLeft(Byte(a), Const(8))), AUniform(context));
         }
 
         // ---- packed halves ----

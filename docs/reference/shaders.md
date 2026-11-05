@@ -622,9 +622,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Dead-code removal dropped the inputs of atomics
 
-- **Cause:** Ryujinx's `Optimizer.RemoveNode` removes a dead node, then follows each source whose last use went away into the node that produced it. It did so even when that producer has side effects, such as an atomic or a call whose result is unused. Such a producer stays in the block, but its sources lost their uses, so the next dead-code pass deleted the chain that feeds it, and the atomic read undefined values.
-- **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
-- **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
+- **Symptom:** a translated image load can use uninitialized coordinates after one result is discarded and another remains in use.
+- **Cause:** when `Optimizer.RemoveNode` removes the last use of a result, it may follow that result back into its producer and detach the producer's input uses. This is valid only if the producer can also be removed. A live sibling result keeps the producer in the block, where it still reads those inputs. The same applies to an atomic or a call with side effects.
+- **Fix:** use the existing `IsUnused` check for the producer before following it. It checks every destination and retains the side-effect protection added by MacNativeGames' translator patch 0002.
+- **Found on:** Ocarina of Time's two foliage simulation compute shaders with uninitialized coordinates in translated SPIR-V. The earlier atomic case did not change the translated output of 94,717 shaders from Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet and ANIMAL WELL.
+- **Check:** `SurfaceLoadLiveness` in `dm/gfx/tests/test_dmsh_ampere_mem.py` uses synthetic instructions to exercise partial and complete image-load elimination and an atomic with an unused result.
 
 ### Position invariance across shaders
 
@@ -1144,6 +1146,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Limit:** only the comparisons. The compilers set .FTZ on nearly every float instruction of every shader, so it is in effect a mode of the whole shader, and Metal has none (`MTLCompileOptions` has math modes, no denormal control). Flushing the arithmetic would be about 3.3 million more sites in Mario Kart World, so its FADD, FMUL and FFMA keep denormals. Four denormal weights can still add up to a normal sum, which NVIDIA sees as zero; it stays finite, so it makes no NaN.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
+
+### Warp-synchronous shared memory without a barrier
+
+- **Symptom:** a compute shader's small scan or sort over shared memory gives wrong results on the Mac: Niagara's sorted particle list is wrong every frame (broken beams, particles drawn in the wrong order), and one-frame flashes of a view.
+- **Cause:** Ampere compilers drop the barrier in scans whose lanes run in lockstep: Unreal's GPU radix sort downsweep stores a word (STS), loads the neighbouring lane's (LDS `[x-4]`), adds and stores again, with no BAR between them. In the MSL the load and the thread's own earlier store do not alias, so Metal may move the load above the store, and the lane reads its neighbour's old value. A Metal reproduction of the downsweep sorted 12 of 100 keys.
+- **Fix:** `dmsh_build.py` `tg_fence` puts a simdgroup-scope memory fence (`atomic_thread_fence(mem_threadgroup, seq_cst, thread_scope_simdgroup)`), not an execution barrier, after each store to a threadgroup array, so it is safe in divergent code. Only kernels with a threadgroup array are touched (about 7.5% of Orbitals' shaders). `tg_spill` runs after it, so a fence on an array moved to device memory orders device memory too.
+- **Found on:** Orbitals (`040004F027560000`, [PR #1275](https://github.com/seedds/nxnative/pull/1275)) and [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): the GPU sort downsweep `d032ce5090303e01` (181 fences): 100 of 100 keys sorted with the fence. With only the fenced downsweep swapped into the library the beams were right (by eye); with the fence in every shader, three 80-frame samples of stage 2 had 0 flash views, against 22 in 80 on the build before (which also lacked the split texture / sampler handle fix).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_tg_fence.py` (the rewrite, the fence's scope after `tg_spill`, and, with the Metal compiler, that both compile).
 
 ### Barrier moves around warp shuffles
 
