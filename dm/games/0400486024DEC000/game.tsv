@@ -35,3 +35,6 @@ shader_note	0400486024DEC000 shaders
 # agl wraps its depth clears in render conditions, as on Donkey Kong Bananza and Splatoon Raiders: in Kokiri Forest the main opaque pass tests EQUAL against a copy of the prepass depth
 # that a conditional clear (skipped on the console) wiped first, so no lit geometry landed and the full-screen sky showed through everywhere (a white scene)
 render_cond	on
+# Metal encoding on its own thread by default on the Mac: the November 5 v131072 playtests ran with DM_NVN_ENC_THREAD=1 (mac.env, runs 16-19) and reported improved frame rate,
+# with the submit thread otherwise encoding before the game's fence waits; DM_NVN_ENC_THREAD=0 keeps the old path for A/B
+enc_thread	on
