@@ -230,6 +230,8 @@ class StageMemory(Translated):
     COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
     COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
     INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+    OWN_PAYLOAD = (0x000fe2000000b800, 0x00001000ff057923)  # ISBERD R5, [RZ + 0x10], mode 0xb8: the payload word this task wrote (Ocarina of Time's 5d3a096025e375a1 +0x80, its write barrier left out)
+    KEEP_R5 = (0x0041e8000000b800, 0x00002005ff007927)     # 0x927 [RZ + 0x20], R5, mode 0xb8
 
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
@@ -240,11 +242,8 @@ class StageMemory(Translated):
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
-    # ISBERD R19, [RZ + 0x10], mode 0xb8: a task reading back its own payload word (Ocarina of Time's 5d3a096025e375a1 +0x80, after its AST of the same word)
-    OWN_OUTPUT = (0x000fe2000000b800, 0x00001000ff137923)
-
-    def test_own_output_is_read_where_ast_stores_it(self):   # 0x120 + 0x10
-        self.assertRegex(self.msl(self.OWN_OUTPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[76\]\)')
+    def test_own_payload_is_read_from_the_outputs(self):   # 0x120 + 0x10
+        self.assertRegex(self.msl(self.OWN_PAYLOAD, self.KEEP_R5), r'as_type<float>\(_\d+\[76\]\)')
 
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
@@ -297,8 +296,6 @@ def sts(offset, rb):   # STS.U32 [RZ + offset], Rb: keeps its result
     return inst(0x000fe80000000800, offset << 40 | rb << 32 | 0xff << 24 | 0x7388)
 
 
-def f32(v): return struct.unpack('<I', struct.pack('<f', v))[0]
-
 
 class OcarinaOfTime(Translated):
     """The Legend of Zelda: Ocarina of Time's compute shaders, in the game's encodings with other registers: F2IP (agl_common's YCbCr encoder, FoliageShader) and ATOMG.CAS (FoliageShader)"""
@@ -311,16 +308,9 @@ class OcarinaOfTime(Translated):
         msl = self.translate(b''.join(code) + inst(*EXIT), shared=0x400)
         return msl[msl.index('kernel void'):]
 
-    def test_f2ip_packs_a_above_b_rounded_and_saturated(self):
-        # each value rounded to nearest even, then max 0 (first, so that dmsh_build's precise::max turns a NaN into 0) and min 255, converted; a's byte shifted by 8 and b's ORed in
-        msl = self.msl(mov(1, f32(300.0)), mov(2, f32(17.5)), self.f2ip(3, 1, 2), sts(0x20, 3))
-        def byte(v, n): return (rf'float (?P<r{n}>_\d+) = rint\({v}\);\s+float (?P<x{n}>_\d+) = fast::max\((?P=r{n}), 0\.0\);\s+float (?P<n{n}>_\d+) = fast::min\((?P=x{n}), 255\.0\);\s+'
-                                rf'uint (?P<u{n}>_\d+) = uint\((?P=n{n})\);\s+')
-        self.assertRegex(msl, byte(r'300\.0', 'a') + r'int (?P<s>_\d+) = int\((?P=ua)\) << 8;\s+' + byte(r'17\.5', 'b') + r'int _\d+ = (?P=s) \| int\((?P=ub)\);')
-
     def test_f2ip_of_another_form_is_refused(self):   # bit 72 also set: a signed destination in F2I's layout, not seen
         with self.assertRaises(AssertionError) as e: self.msl(self.f2ip(3, 1, 2, hi=0x000fe200000005ff), sts(0x20, 3))
-        self.assertIn('F2IP of another form', str(e.exception))
+        self.assertIn('F2IP other than', str(e.exception))   # its forms are test_dmsh_ampere_alu.py's (F2ip, F2ipTruncate)
 
     def test_atomg_cas_returns_the_old_value(self):
         # compare R8, swap in R9, at an address no storage buffer holds (the memory pools' helper does the swap); the STS waits on every barrier, as the game's ISETP waits on the CAS's,
