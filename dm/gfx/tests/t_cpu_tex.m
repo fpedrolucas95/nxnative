@@ -101,7 +101,7 @@ static void finalized_upload(int write_after_record) {
     mtl_reg_tex(1,NULL,NULL); mtl_reg_tex(2,NULL,NULL); h_nvnCommandBufferFinalize(&cmd);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     CHECK(!tex_cpu_written(serial), "pool finalization drops retired CPU classification");
-    defer_drain(); munmap(mem,len);
+    defer_drain(); mtl_guest_released((uintptr_t)mem, (uintptr_t)mem + len); munmap(mem,len);   // as the host's guest_release: the next pool may be mapped here
 }
 static void finalized_bindless_pool(void) {
     enum { N = NGHOST + 16, FIRST = 256, STRIDE = 4096 };

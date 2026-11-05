@@ -81,7 +81,8 @@ int main(void) { @autoreleasepool {
     S.vbuf[0].address = (uint64_t)(mem + 3); bind_vbufs(en); capture(en, out, 6); enc_r_end(en); finish();
     // The same guest address can acquire a new Metal GPU address. Hold the old buffer to prevent address recycling.
     id<MTLBuffer> old = (__bridge id<MTLBuffer>)mb;
-    mtl_pool_del(mem); mtl_pool_add(mem, size);
+    // Pages the host gave back in between (guest_release): a freed pool's buffer is not taken back over them (pool_reuse_dead), so the new pool gets a buffer of its own
+    mtl_pool_del(mem); mtl_guest_released((uintptr_t)mem, (uintptr_t)mem + size); mtl_pool_add(mem, size);
     uint64_t newgpu; mtl_gpu_addr((uint64_t)(mem + 3), 1, &mb, &off, &newgpu);
     EXPECT("replacement buffer has a different GPU address", 1, old.gpuAddress + 12 != newgpu);
     mtl_sub_begin(); en = encoder(ps); resolves = g_vbuf_resolve;

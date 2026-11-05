@@ -608,7 +608,20 @@ static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= 
 // A new pool over exactly the pages of a pool freed a moment ago takes back that pool's no-copy buffer while its deferred release still waits for the GPU. PRAGMATA's first
 // load frees large pools and makes new ones at the same addresses within a frame: each pair stayed in the residency set twice until the old one's fence completed (12 freed
 // pools, 3,380 MB), and the set reached 5,293 MB of Metal's 5,461 MB working set on an 8 GB Mac, where command buffers failed with kIOGPUCommandBufferCallbackErrorOutOfMemory.
-// The same range only: a longer old buffer would keep wiring pages the game may since have unmapped
+// The same range only: a longer old buffer would keep wiring pages the game may since have unmapped. Pages the host gave back meanwhile drop the buffer from the list (mtl_guest_released)
+// The host gave guest pages [lo, hi) back to the system (hle_svc.c guest_release, UnmapPhysicalMemory or a smaller heap): a freed pool's no-copy buffer over them still holds the
+// old physical pages, so it can no longer be taken back by a pool made there later (pool_reuse_dead). Taken back, the GPU read and wrote the old pages while the CPU had the new
+// ones: t_cpu_tex's finalized-texture readback, whose second pool is mapped where the first one was unmapped, read stale bytes
+void mtl_guest_released(uintptr_t lo, uintptr_t hi) {
+    if (!g_dead_pools) return;
+    @autoreleasepool {
+    pthread_mutex_lock(&g_mu);
+    NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
+    for (id<MTLBuffer> d in g_dead_pools) { uintptr_t a = (uintptr_t)d.contents; if (a < hi && lo < a + d.length) [gone addObject:d]; }
+    for (id<MTLBuffer> d in gone) [g_dead_pools removeObject:d];
+    pthread_mutex_unlock(&g_mu);
+    }
+}
 static id<MTLBuffer> pool_reuse_dead(uintptr_t a, uintptr_t len) {
     id<MTLBuffer> hit = nil;
     @autoreleasepool {

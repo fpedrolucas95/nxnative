@@ -189,7 +189,10 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // out of phys_footprint, and madvise(MADV_FREE) does nothing to pages that are not writable, though it returns 0 (1 GiB on the Mac: 1,024 MiB still resident and dirty; this: 0).
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
 // on failure the range is only inaccessible, with its old bytes
+// nvn_mtl.m defines it; this weak empty one serves the host tests that link no graphics (the linker takes nvn_mtl.m's where both are present)
+__attribute__((weak)) void mtl_guest_released(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; }
 static int guest_release(uintptr_t lo, uintptr_t hi) {
+    mtl_guest_released(lo, hi);   // a freed pool's buffer over these pages keeps the old ones: no new pool may take it back
     if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
     static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);

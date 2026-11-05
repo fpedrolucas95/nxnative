@@ -15,6 +15,8 @@ void bf_want_note(const char *key);
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_del(const void *mem);
+// guest pages [lo, hi) went back to the system (the host's guest_release): freed pools' buffers over them are not taken back by a new pool
+void mtl_guest_released(uintptr_t lo, uintptr_t hi);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
 // physical memory pool Finalize: the shared placement sparse tiles of its memory go back once no texture maps them (sp_release)
