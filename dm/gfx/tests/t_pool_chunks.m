@@ -101,5 +101,19 @@ int main(void) { @autoreleasepool {
     gml_read(log, old_map, -1, 0);
     CHECK("a completed bitmap resolves its entry in the original map", g_gml_n == 1 && g_gml_lo[0] == range[0] && g_gml_hi[0] == range[1]);
     mtl_pool_del(small); mtl_drain();
+    // Contiguous small pools past 256 (GMEM_RUN_MAX = 1024): Ocarina of Time (Switch 2) allocates 521 contiguous 64 KB pools for a 32.56 MB arena; gmem_map merges them into one DMSH_GMEM_MAP_ENTRIES entry
+    const int NRUN = 300; const uint64_t STEP = 65536;
+    uint8_t *contig = mmap(NULL, NRUN * STEP, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (contig == MAP_FAILED) abort();
+    for (int i = 0; i < NRUN; i++) mtl_pool_add(contig + i * STEP, STEP);
+    mtl_sub_begin(); id<MTLBuffer> gmap = gmem_map(); finish();
+    const uint8_t *gt = (const uint8_t *)gmap.contents;
+    int merged = 0;
+    for (int i = 1; i < DMSH_GMEM_MAP_ENTRIES; i++) {
+        const uint64_t *ge = (const void *)(gt + (size_t)i * DMSH_GMEM_MAP_ENTRY);
+        if (ge[0] == (uint64_t)(uintptr_t)contig && ge[1] == (uint64_t)(uintptr_t)contig + NRUN * STEP) merged = 1;
+    }
+    CHECK("300 contiguous 64 KB pools merge into a single gmem_map entry", merged);
+    for (int i = 0; i < NRUN; i++) mtl_pool_del(contig + i * STEP);
+    mtl_drain(); munmap(contig, NRUN * STEP); munmap(small, 64 * MB); munmap(mem, GB);
     printf("t_pool_chunks: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}
