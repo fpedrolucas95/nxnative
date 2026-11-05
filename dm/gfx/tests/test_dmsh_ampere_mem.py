@@ -333,12 +333,15 @@ class RawGlobal(Translated):
     """A load at an address the shader loaded from memory, which no storage buffer holds (GlobalToStorage.TryGenerateRawStorageOp): it goes through the host's pool table
     (dmsh_abi.h DMSH_GMEM_MAP_*), the chunk's hint in words 6 and 7 of an entry, else a binary search over as many entries as entry 0 says (word 4), however many the pools need.
     t_gmem_raw runs it on the GPU against the host's table (--fixture)"""
-    LDG_PTR = (ctrl(wb=2) | 0x1e1b00, 0x0000000002047381)                # LDG.E.64 R4, [R2.64]: the address, from storage slot 0 (R2:R3 set as AtomgCas sets them)
+    ULDC = (0x000fe40000000a00, 0x0000100000067ab9)      # ULDC.64 UR6, c[0][0x40]: storage slot 0 with this job's c0 layout (3 uniform buffers, 1 storage buffer)
+    ADDR_LO = (0x000fe2000f8e00ff, 0x00000006ff027e24)   # IMAD.U32 R2, RZ, RZ, UR6
+    ADDR_HI = (0x001fca000f8e00ff, 0x00000007ff037e24)   # IMAD.U32 R3, RZ, RZ, UR7
+    LDG_PTR = (ctrl(wb=2) | 0x1e1b00, 0x0000000002047381)                # LDG.E.64 R4, [R2.64]: the address, from storage slot 0 (R2:R3 from ULDC, ADDR_LO and ADDR_HI)
     LDG_RAW = (ctrl(wb=3, wait=0b100) | 0x1e1900, 0x0000000004067381)    # LDG.E R6, [R4.64]: at that address
     STORE = (ctrl(wait=0b1000, stall=4) | 0x900, 0x0000080602007386)     # STG.E [R2.64 + 8], R6: what it read, at word 2 of storage slot 0
 
     def msl(self):
-        code = b''.join(inst(*c) for c in (AtomgCas.ULDC, AtomgCas.ADDR_LO, AtomgCas.ADDR_HI, self.LDG_PTR, self.LDG_RAW, self.STORE)) + inst(*EXIT)
+        code = b''.join(inst(*c) for c in (self.ULDC, self.ADDR_LO, self.ADDR_HI, self.LDG_PTR, self.LDG_RAW, self.STORE)) + inst(*EXIT)
         return self.translate(code, nvn2_cs=[3, 1, 0, 0x50, 0])
 
     def has(self, msl, pattern): self.assertTrue(re.search(pattern, msl), f'no {pattern} in the raw access function')   # not the whole source in the message
