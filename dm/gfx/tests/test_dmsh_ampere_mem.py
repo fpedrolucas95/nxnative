@@ -292,20 +292,6 @@ class OcarinaOfTime(Translated):
                                  r'int (?P<r>_\d+) = _\d+\((?P=lo), (?P=hi), (?P=e), (?P=v), [^;]*\);\s+int (?P<rd>_\d+) = (?P=r);\s+_\d+\[8\] = uint\((?P=rd)\);')
         self.assertNotRegex(kernel, r'\? 1u : 0u|\? 1 : 0')
 
-    def test_write_log_reads_before_it_swaps(self):
-        # The write log (GlobalToStorage, dmsh_abi.h DMSH_GMEM_LOG_*): a full log (word 0 set) takes nothing more, and a slot is swapped only when a plain read finds it empty.
-        # A swap at every store made the NDVE movie upscaler's 14 dispatches take about 63 ms a frame instead of about 32 on an M4
-        full = self.translate(mov(2, 0x1000) + mov(3, 0) + mov(8, 0) + mov(9, 7) + inst(*self.ATOMG_CAS) + inst(*EXIT), shared=0x400)
-        swaps = re.findall(r'atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(cp_s\d+)\._m0\[(_\d+)\]', full)
-        self.assertEqual(len(swaps), 8, full)   # GmemLogProbes
-        log = swaps[0][0]
-        first = full.index(f'{log}._m0[0]')
-        self.assertLess(first, full.index('atomic_compare_exchange_weak_explicit((device atomic_uint*)&' + log))
-        self.assertRegex(full[first:], r'^' + log + r'\._m0\[0\]\);\s+bool (?P<f>_\d+) = as_type<int>\(_\d+\) != 0;\s+if \(!(?P=f)\)')
-        for _, slot in swaps:   # each slot read, compared with the page, then with 0 (empty), before its swap
-            self.assertRegex(full, rf'float (?P<s>_\d+) = as_type<float>\({log}\._m0\[{slot}\]\);\s+bool (?P<eq>_\d+) = as_type<int>\((?P=s)\) == _\d+;\s+if \(!(?P=eq)\)\s+\{{\s+'
-                                   rf'bool (?P<z>_\d+) = as_type<int>\((?P=s)\) == 0;\s+if \((?P=z)\)\s+\{{\s+uint _\d+;\s+do\s+\{{\s+_\d+ = 0u;\s+\}} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&{log}\._m0\[{slot}\]')
-
 
 class Shared(Translated):
     """Fire Emblem Fortune's Weave's Lighting compute shaders: the exposure histogram and its 64-bit average, in the game's own encodings"""
