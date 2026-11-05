@@ -174,7 +174,7 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
 static void hq_poll(void);
 static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
 static void pad_read(GCExtendedGamepad *g) {
-    if (!g_input_on) return;
+    if (!g_input_on || g_hidpad_only) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
@@ -205,11 +205,13 @@ static void pro_devices_changed(void) { pro_players_changed(nil); }
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
 static int merge_pads_left(GCController *gone) {
     if (g_hidpads) return 1;
+    if (g_hidpad_only) return 0;
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) return 1;
     return 0;
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    if (g_hidpad_only) return;
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
@@ -408,6 +410,8 @@ static void hq_close(void) {
     hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
 }
 static void pads_start(void) {
+    // Some wired pads advertise GameController support but never acquire a GCController.
+    const char *source = getenv("DM_HID_PADS"); g_hidpad_only = source && !strcmp(source, "only");
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     static const char kbd = 0;
