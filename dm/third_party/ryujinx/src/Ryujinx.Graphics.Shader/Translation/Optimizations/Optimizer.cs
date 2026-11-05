@@ -394,7 +394,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
                         // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
                         // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
-                        if (!HasSideEffects(src.AsgOp))
+                        // The same holds for a producer with several outputs (HMMA's fragment registers) whose other outputs are still read: only a producer that is
+                        // unused as a whole is removed, so only its sources lose a use. Following any producer without side effects made the NDVE and NDSR networks
+                        // (Ocarina of Time's title movie and upscaler) read undefined fragments: blocks in the picture
+                        if (IsUnused(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }

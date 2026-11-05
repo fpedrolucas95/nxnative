@@ -137,6 +137,8 @@ class UimadImmediateC(Alu):
     def test_adds_the_immediate(self):
         msl = self.kept(uldc(4, 0, 0x40), uldc(6, 0, 0x44), self.UIMAD, self.MOV)
         self.assertRegex(msl, r'\* as_type<int>\([^;]*\);\s*int _\d+ = _\d+ \+ 10;')
+
+
 class Vote(Alu):
     """VOTEU (0x886) writes the uniform predicate UPd and leaves the lane predicate of that number alone; VOTE (0x806) writes the lane predicate. nvdisasm reads 0x886 as
     VOTEU.ANY UP0, P0 (CuAssembler's sm_86 records) and NAK encodes it with a uniform destination at 81..84. Yoshi and the Mysterious Book's cbd80cb96ad38a61 votes P0 into

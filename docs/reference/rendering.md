@@ -969,6 +969,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** such a copy, either way between the two formats, goes through a staging buffer kept from copy to copy: the 32-bit float depth is copied out of the source with `MTLBlitOptionDepthFromDepthStencil` and into the destination's depth plane the same way (`nvn_mtl.m`, the texture copy).
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (Frostbite): from the title on.
 
+### Indirect mesh draws on the encode thread
+
+- **Symptom:** with `DM_NVN_ENC_THREAD=1`, `FATAL deferred encoding: DmRecEnc has no stand-in for -drawMeshThreadgroupsWithIndirectBuffer:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:` at the first `nvnCommandBufferDrawMeshTasksIndirect`.
+- **Cause:** the recording encoder (`nvn_rec.h`) had the direct mesh draw only; the indirect one came with GPU-written task and mesh arguments (`mtk_encode`).
+- **Fix:** `RO_R_MESH_IND` records the argument address and the object and mesh threadgroup sizes, and replays the call.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), seconds into Kokiri Forest.
+
 ### Depth plane copies on the encode thread
 
 - **Symptom:** `FATAL deferred encoding: DmRecEnc has no stand-in for -copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:` with Metal encoding on its own thread (`DM_NVN_ENC_THREAD=1`, the default on iOS), at the first [depth plane copy](#depth-plane-copies-between-depth-formats).

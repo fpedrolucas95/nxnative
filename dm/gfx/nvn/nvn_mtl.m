@@ -304,6 +304,7 @@ static void res_check(id r, const char *what, int reg) {
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
 static void res_top(const char *why);
+static void alias_report(void);
 // DM_NVN_RES_LIMIT_MB (a test guard, off by default): once the residency set holds more than that, report what it holds and exit gracefully. On an 8 GB Mac a set near Metal's
 // working set left command buffers failing with kIOGPUCommandBufferCallbackErrorOutOfMemory and the submit thread stuck in the kernel, and WindowServer hit its watchdog (PRAGMATA's
 // opening load): the guard stops the game before the GPU starves the desktop
@@ -360,6 +361,7 @@ static void res_top(const char *why) { @autoreleasepool {
         if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; MLOG("  texture %lux%lux%lu format %lu levels %lu%s: %llu MB", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t.isSparse ? " (sparse)" : "", (unsigned long long)(t.allocatedSize >> 20)); }
         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
+    alias_report();
 } }
 void dm_gfx_restop(void) { res_top("DM_CTL restop"); }
 static void res_top_once(NSError *err) {
@@ -2038,16 +2040,83 @@ static void image_desc_drop_pool(const void *pool) {   // caller holds g_smu
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
 static uint64_t g_stat_ghost_skip;   // finalized serials resolved to a shared texture without a ghost entry (tex_mtl_)
+static nvn_hmap g_pool_heap;   // defined with pool_heap_texture
+static _Atomic uint64_t g_pool_heap_tex;
 static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
 // On memory pool Finalize, evict the textures built on that pool from the sharing table (collect the keys first, then delete: deletion shifts entries back). The sharing table used not to evict: Mario's pools stay for good, so entries are bounded;
 // Engage frees pools on scene changes and rebuilds on new ones, so the old pools' render targets and other private textures stayed in the table forever (about 0.8 GB more GPU memory over 850 s of the title demo), and linear textures built directly on a pool also kept the whole pool buffer alive.
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
 static void treg_drop_pool_views(const void *pool);
 static void cpu_tex_drop_pool(const void *pool);
+// The sharing table in the memory report: its textures, the Metal memory they hold, and the NVN storage under them (the union of their pool ranges, per pool). Textures over the same
+// storage with other descriptions are separate Metal textures (alias_take_over spares those looked up in the last ALIAS_IDLE submissions), so where Metal holds much more than the
+// storage, the game reuses that storage for several targets and each holds its own copy. Also the five pools with the most Metal memory over them
+static int alias_rng_cmp(const void *x, const void *y) { const int64_t *a = x, *b = y; return a[0] < b[0] ? -1 : a[0] > b[0]; }
+static void alias_report(void) {
+    typedef struct { uint64_t pool, n, metal, store; } pool_sum;
+    pthread_mutex_lock(&g_smu);
+    uint32_t cap = g_alias.cap, ne = 0;
+    struct { uint64_t pool; int64_t lo, hi; uint64_t metal; } *e = malloc((size_t)(cap ? cap : 1) * sizeof *e);
+    for (uint32_t i = 0; e && i < cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        nvn_texlayout L; nvn_tex_layout(&k.d, &L);
+        id<MTLTexture> o = (__bridge id<MTLTexture>)g_alias.vals[i];
+        e[ne].pool = k.pool; e[ne].lo = k.off; e[ne].hi = k.off + (int64_t)L.size; e[ne].metal = [o conformsToProtocol:@protocol(MTLTexture)] && !o.heap ? o.allocatedSize : 0; ne++;   // a texture in a heap: the heap's memory, counted once below
+    }
+    pthread_mutex_unlock(&g_smu);
+    if (!e) return;
+    pool_sum *ps = calloc(ne ? ne : 1, sizeof *ps); uint32_t np = 0; uint64_t metal = 0, store = 0;
+    for (uint32_t i = 0; ps && i < ne; i++) {
+        if (e[i].pool == UINT64_MAX) continue;
+        uint64_t pool = e[i].pool; int64_t (*r)[2] = malloc((size_t)ne * sizeof *r); uint32_t nr = 0; pool_sum s = {pool, 0, 0, 0};
+        for (uint32_t j = i; r && j < ne; j++) if (e[j].pool == pool) { r[nr][0] = e[j].lo; r[nr][1] = e[j].hi; nr++; s.n++; s.metal += e[j].metal; e[j].pool = UINT64_MAX; }
+        if (r) { qsort(r, nr, sizeof *r, alias_rng_cmp);
+            for (uint32_t a = 0, b; a < nr; a = b) { int64_t lo = r[a][0], hi = r[a][1]; for (b = a + 1; b < nr && r[b][0] < hi; b++) if (r[b][1] > hi) hi = r[b][1]; s.store += (uint64_t)(hi - lo); }
+            free(r); }
+        ps[np++] = s; metal += s.metal; store += s.store;
+    }
+    uint64_t hb = 0; unsigned hn = 0;
+    pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; i < g_pool_heap.cap; i++) if (g_pool_heap.vals[i]) { hb += ((__bridge NvImageHeap *)g_pool_heap.vals[i])->heap.size; hn++; }
+    pthread_mutex_unlock(&g_smu);
+    MLOG("  sharing table: %u textures, %llu MB of Metal memory of their own over %llu MB of NVN storage in %u pools; pool heaps %u, %llu MB, %llu textures made in them so far", ne, (unsigned long long)(metal >> 20),
+         (unsigned long long)(store >> 20), np, hn, (unsigned long long)(hb >> 20), (unsigned long long)atomic_load(&g_pool_heap_tex));
+    for (int q = 0; q < 5; q++) { int best = -1; for (uint32_t i = 0; i < np; i++) if (ps[i].n && (best < 0 || ps[i].metal > ps[best].metal)) best = (int)i;
+        if (best < 0) break;
+        MLOG("    pool %#llx: %llu textures, %llu MB of Metal memory over %llu MB of storage", (unsigned long long)ps[best].pool, (unsigned long long)ps[best].n, (unsigned long long)(ps[best].metal >> 20), (unsigned long long)(ps[best].store >> 20));
+        if (!q) {   // the largest pool's textures by offset, format and flags: a family at one offset that differs in size is a dynamic-resolution set (image_texture's families)
+            uint64_t top = ps[best].pool;
+            pthread_mutex_lock(&g_smu);
+            typedef struct { int64_t off; int fmt, flags, n; uint32_t wmin, wmax, hmin, hmax; uint64_t metal; } grp;
+            grp g[64]; int ng = 0, more = 0;
+            for (uint32_t i = 0; i < g_alias.cap; i++) {
+                if (!g_alias.vals[i]) continue;
+                alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+                if (k.pool != top) continue;
+                id<MTLTexture> o = (__bridge id<MTLTexture>)g_alias.vals[i];
+                int j = 0; for (; j < ng; j++) if (g[j].off == k.off && g[j].fmt == k.d.format && g[j].flags == k.d.flags) break;
+                if (j == ng) { if (ng == 64) { more++; continue; } g[ng++] = (grp){k.off, k.d.format, k.d.flags, 0, UINT32_MAX, 0, UINT32_MAX, 0, 0}; }
+                g[j].n++; g[j].metal += o.allocatedSize;
+                if (k.d.width < g[j].wmin) g[j].wmin = k.d.width; if (k.d.width > g[j].wmax) g[j].wmax = k.d.width;
+                if (k.d.height < g[j].hmin) g[j].hmin = k.d.height; if (k.d.height > g[j].hmax) g[j].hmax = k.d.height;
+                (void)k.d.target;
+            }
+            pthread_mutex_unlock(&g_smu);
+            MLOG("      %d groups by offset, format and flags%s", ng, more ? " (more not counted)" : "");
+            for (int r = 0; r < 12; r++) { int b = -1; for (int j = 0; j < ng; j++) if (g[j].n && (b < 0 || g[j].metal > g[b].metal)) b = j;
+                if (b < 0) break;
+                MLOG("      offset %#llx format %#x flags %#x: %d textures, %ux%u to %ux%u, %llu MB", (unsigned long long)g[b].off, g[b].fmt, g[b].flags, g[b].n, g[b].wmin, g[b].hmin, g[b].wmax, g[b].hmax, (unsigned long long)(g[b].metal >> 20));
+                g[b].n = 0; }
+        }
+        ps[best].n = 0; }
+    free(ps); free(e);
+}
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
     image_desc_drop_pool(pool);
+    { uint64_t key = (uint64_t)(uintptr_t)pool; void *h = nvn_hm_del(&g_pool_heap, &key); if (h) CFRelease(h); }   // its textures keep the heap (pool_heap_texture)
     uint32_t n = 0; alias_key *ks = NULL;
     for (uint32_t i = 0; i < g_alias.cap; i++) {
         if (!g_alias.vals[i]) continue;
@@ -3488,6 +3557,68 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     }
     return mt;
 }
+// GPU-only memory pools whose textures overlap: one placement heap per pool, each texture at POOL_HEAP_K times its pool offset. NVN textures are descriptors over pool memory, and a
+// game reuses storage for several targets (agl's transient render targets; dynamic-resolution sets made for every resolution at one offset). Each new description over the storage was a
+// texture of its own: in Ocarina of Time one 113 MB pool held 662 Metal textures and 1,923 MB (85 depth textures at one offset, 1306x1306 to 1920x1920, 789 MB; the rest 1536x864
+// targets at overlapping offsets), and the GPU ran out of an M4's 12 GB working set loading Kokiri Forest. In the heap, textures whose storage overlaps on NVN share bytes on Metal, and
+// textures whose storage does not overlap do not (of one format: see below): [K off, K (off + size)) holds the Metal texture, which fits where Metal's size is at most K times NVN's (else the texture keeps its
+// own allocation). The heap is made at the pool's first overlap (other pools keep their own textures), K times the pool, up to POOL_HEAP_MAX. As on NVN, a texture over bytes another
+// description wrote reads those bytes reinterpreted; a texture over storage no other shared texture covers is filled as a new one is. Aliasing barriers: g_image_heap_n (resource_vis)
+enum { POOL_HEAP_K = 2 };
+#define POOL_HEAP_MAX (1ull << 30)
+static nvn_hmap g_pool_heap = {.klen = 8};   // pool → NvImageHeap (CFBridgingRetain'ed), under g_smu; dropped with the pool (mtl_alias_drop_pool), its textures keep the heap
+// Stopgap: keep placement-heap sharing opt-in while Ocarina's DOF corruption remains open; matching formats alone has not been validated to preserve the image.
+static int pool_heap_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_POOL_HEAP"); m = e ? atoi(e) : 0; } return m; }   // 0 off (default), 1 on, 2 on without GPU-optimized contents (diagnostic)
+static id<MTLTexture> pool_heap_texture(const tex_t *t, MTLTextureDescriptor *d) {
+    const pool_t *p = t->pool;
+    if (!pool_heap_mode()) return nil;
+    if (pool_heap_mode() == 2) d.allowGPUOptimizedContents = NO;
+    // A virtual pool mapped onto one physical pool (vmode 1) is addressed as one: Ocarina of Time's transient render targets are in a 305 MB one (flags 0x2a1). A sparse one is not
+    if (!p || !p->mem || !(p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || ((p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && p->vmode != 1) || nvn_sparse_pool(p) || !t->L.size
+        || p->size > POOL_HEAP_MAX / POOL_HEAP_K || d.storageMode != MTLStorageModePrivate || t->off < 0 || (uint64_t)t->off + t->L.size > p->size) return nil;
+    uint64_t key = (uint64_t)(uintptr_t)p; int64_t lo = t->off, hi = t->off + (int64_t)t->L.size; int overlap = 0, other = 0;
+    pthread_mutex_lock(&g_smu);
+    NvImageHeap *owner = (__bridge NvImageHeap *)nvn_hm_get(&g_pool_heap, &key);
+    for (uint32_t i = 0; i < g_alias.cap && !other; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != key || k.off >= hi) continue;
+        nvn_texlayout kl; nvn_tex_layout(&k.d, &kl);
+        if (k.off + (int64_t)kl.size <= lo) continue;
+        overlap = 1; other = k.d.format != t->d.format;
+    }
+    pthread_mutex_unlock(&g_smu);
+    // Storage another format covers keeps its own texture: a texel's bytes are where NVN's block-linear layout puts them for every format of a size, and a game reads one format's
+    // writes through another (Ocarina of Time's depth of field: 256x144 and 512x288 tile maps showed blocks of other targets' bytes, and the background blur blocks, with the heap on).
+    // Metal lays each format and size out its own way, so only the same format shares the heap (the dynamic-resolution sets; image_texture's families likewise)
+    if (other || (!owner && !overlap)) return nil;
+    if (!owner) {
+        MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = (NSUInteger)(p->size * POOL_HEAP_K);
+        hd.storageMode = MTLStorageModePrivate; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
+        if (!heap) { RED_ONCE(141, "cannot make a %llu MB placement heap for a memory pool whose textures overlap: they keep their own allocations", (unsigned long long)((p->size * POOL_HEAP_K) >> 20)); return nil; }
+        NvImageHeap *made = [NvImageHeap new]; made->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
+        pthread_mutex_lock(&g_smu);
+        owner = (__bridge NvImageHeap *)nvn_hm_get(&g_pool_heap, &key);   // another thread may have made one meanwhile
+        if (!owner) { nvn_hm_put(&g_pool_heap, &key, (void *)CFBridgingRetain(made)); owner = made; }
+        pthread_mutex_unlock(&g_smu);
+        if (owner == made) { static int n; if (n++ < 8) MLOG("memory pool %p (%llu MB, GPU-only): its textures overlap, so they share a %llu MB placement heap at %d times their pool offsets", (const void *)p,
+                                                         (unsigned long long)(p->size >> 20), (unsigned long long)(heap.size >> 20), POOL_HEAP_K); }
+    }
+    if (owner->heap.cpuCacheMode != d.cpuCacheMode) return nil;
+    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+    uint64_t al = need.align ? need.align : 1, at = ((uint64_t)lo * POOL_HEAP_K + al - 1) / al * al;
+    if (!need.size || at + need.size > (uint64_t)hi * POOL_HEAP_K || at + need.size > owner->heap.size) {
+        static int n; if (n++ < 4) MLOG("texture %ux%u format %#x: Metal's %llu bytes (alignment %llu) do not fit %d times its %llu NVN bytes in its pool's heap: it keeps its own allocation", t->d.width, t->d.height, t->d.format,
+                                         (unsigned long long)need.size, (unsigned long long)need.align, POOL_HEAP_K, (unsigned long long)t->L.size);
+        return nil;
+    }
+    id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:at]; if (!mt) return nil;
+    objc_setAssociatedObject(mt, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    res_add(mt); atomic_fetch_add(&g_pool_heap_tex, 1);
+    if (!overlap && !tex_init_fill(t, mt)) tex_zero_fill(mt);   // over storage another texture covers, the bytes are that texture's, as on NVN
+    return mt;
+}
 // The host texture a texture already has, made and refreshed by nothing: for a texture whose storage is gone (a memory pool finalized, tex_mtl_ and tex_by_id). nil if it has none
 static id<MTLTexture> tex_made(const tex_t *t) {
     id have = tex_get(t->serial);
@@ -3653,6 +3784,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
         mt = image_texture(t, d);
+        if (!mt) mt = pool_heap_texture(t, d);
         if (!mt) { mt = [g_dev newTextureWithDescriptor:d];
             if (mt) { res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }

@@ -1167,6 +1167,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): 28 F2IPs to the nearest in 10 compute shaders that convert a picture into BT.709 Y and CbCr bytes (`99951da6e5cd38f5`, `aaa785ced92a88ef` and eight larger ones), and 14 truncating ones of a colour channel times 255 in 8 foliage mesh shaders (`740e2b04db624fb1` and seven others, `Foliage.Product.110`). With both, 42,850 of its 42,851 shaders translate; the one left (`68bbe98b3bfd9876`, agl_common) has data in place of code, as in [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`F2ip`: the game's encoding on live registers, the byte order and the encodings refused; `F2ipTruncate`: the mesh shaders' encoding and the other rounding modes; `UimadImmediateC`: UIMAD with its immediate in C, another of the game's forms).
 
+### Dead-code removal following a producer with outputs still read
+
+- **Symptom:** a compute shader with HMMA (a network: NDVE's movie enhancement, agl's NDSR upscaler) writes blocks of wrong values; Ocarina of Time's title movie and its depth of field showed square blocks, with no `[RED]` line at build or run time.
+- **Cause:** `Optimizer.RemoveNode`, after removing an operation, followed each source whose last use it was into the source's producer and removed that producer's own uses of its sources, for any producer without side effects. A producer with several outputs (HMMA writes a fragment of several registers) stays in the block while another output is read, so its sources lost a use they still had, and the next dead-code pass deleted the chain that fed them: the HMMA read undefined values.
+- **Fix:** follow only into a producer that `IsUnused` says will go as a whole (no side effects, every output local and unread). From a fix shared on the nxnative issue tracker for Ocarina of Time.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (chain 72458830f2f7).
+- **Check:** every `test_dmsh_*.py` (HMMA included) against the rebuilt translator; the picture is not yet checked in the game.
+
 ### Float atomic adds dropped (F32FtzRn)
 
 - **Symptom:** the shader build's translator summary lists `Invalid reduction type: F32FtzRn.` (`translator … in N shaders`); the shaders build and run, with no `[RED]` line at run time, but what they accumulate in memory stays as it was. On Ocarina of Time: Kokiri Forest's ground drawn without its texture, twitching foliage, and bright areas burnt out.
