@@ -325,6 +325,50 @@ class OcarinaOfTime(Translated):
         self.assertNotRegex(kernel, r'\? 1u : 0u|\? 1 : 0')
 
 
+def ctrl(wb=7, wait=0, stall=2):   # an instruction's control bits, high word: stall, yield, write barrier wb, no read barrier, waiting on the barriers in wait
+    return (stall | 1 << 4 | wb << 5 | 7 << 8 | wait << 11) << 41
+
+
+class RawGlobal(Translated):
+    """A load at an address the shader loaded from memory, which no storage buffer holds (GlobalToStorage.TryGenerateRawStorageOp): it goes through the host's pool table
+    (dmsh_abi.h DMSH_GMEM_MAP_*), the chunk's hint in words 6 and 7 of an entry, else a binary search over as many entries as entry 0 says (word 4), however many the pools need.
+    t_gmem_raw runs it on the GPU against the host's table (--fixture)"""
+    LDG_PTR = (ctrl(wb=2) | 0x1e1b00, 0x0000000002047381)                # LDG.E.64 R4, [R2.64]: the address, from storage slot 0 (R2:R3 set as AtomgCas sets them)
+    LDG_RAW = (ctrl(wb=3, wait=0b100) | 0x1e1900, 0x0000000004067381)    # LDG.E R6, [R4.64]: at that address
+    STORE = (ctrl(wait=0b1000, stall=4) | 0x900, 0x0000080602007386)     # STG.E [R2.64 + 8], R6: what it read, at word 2 of storage slot 0
+
+    def msl(self):
+        code = b''.join(inst(*c) for c in (AtomgCas.ULDC, AtomgCas.ADDR_LO, AtomgCas.ADDR_HI, self.LDG_PTR, self.LDG_RAW, self.STORE)) + inst(*EXIT)
+        return self.translate(code, nvn2_cs=[3, 1, 0, 0x50, 0])
+
+    def has(self, msl, pattern): self.assertTrue(re.search(pattern, msl), f'no {pattern} in the raw access function')   # not the whole source in the message
+
+    def test_the_search_takes_the_tables_count(self):   # a loop of log2(count) steps from word 4 of entry 0, not 12 steps over a table of 4,096
+        msl = self.msl()
+        self.has(msl, r'= 0 \+ 4;')
+        self.has(msl, r'\bdo\s*\{[^}]*>> uint\(1\)[^}]*\} while \(')
+        self.assertFalse(re.search(r'\b2048u?\b', msl), 'an unrolled search over 4,096 entries')
+
+    def test_the_hint_has_its_chunk_and_entry_in_two_words(self):   # the 32-bit chunk number in word 6, any entry's index in word 7; chunks whole below 2^53
+        msl = self.msl()
+        for pattern in (r'>> uint\(21\)', r'& 4095;', r'\+ 6;', r'\+ 7;', r'< 2097152u'): self.has(msl, pattern)
+
+    def test_the_bindings_are_the_ones_t_gmem_raw_fills(self):   # storage slot 0 written at word 2 [[id(0)]], the pool table [[id(1)]]
+        msl = self.msl()
+        self.has(msl, r'device _\d+\* cp_s0 \[\[id\(0\)\]\];\s*(const )?device _\d+\* cp_s1 \[\[id\(1\)\]\];')
+        self.has(msl, r'cp_s0\)\._m0\[2\] = ')
+
+
+def raw_fixture(out):
+    """<out>/raw.metallib: RawGlobal's shader, compiled as the build compiles (dmsh_build.py MAC_METAL and METAL_DEPTH), for t_gmem_raw. Exit code 77 when the translator does not run"""
+    xlate = os.environ.get('DMSH_TEST_XLATE')
+    if not xlate or subprocess.run([xlate, '--source-sha'], capture_output=True).returncode: sys.exit(77)
+    msl = Path(out) / 'raw.metal'; msl.write_text(RawGlobal('test_the_search_takes_the_tables_count').msl())
+    air = Path(out) / 'raw.air'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fbracket-depth=1024', str(msl), '-o', str(air)], check=True)
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(Path(out) / 'raw.metallib')], check=True)
+
+
 class Shared(Translated):
     """Fire Emblem Fortune's Weave's Lighting compute shaders: the exposure histogram and its 64-bit average, in the game's own encodings"""
     STS_SCALED_4 = 0x000fe80000004800, 0x0000000302027388   # STS.U32 [R2 * 4], R3 (6d0f6db3f0d396a3 +0x80 with a value): R2 counts words. Read unscaled, bin b came back at about 4b
@@ -536,4 +580,5 @@ class Pokopia(Translated):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--fixture': raw_fixture(sys.argv[2]); sys.exit(0)
     unittest.main()
