@@ -90,8 +90,11 @@ int main(void) { @autoreleasepool {
     free(lin);
     mtl_tex_release(&t);
     // Raw global memory: the table reaches all of it, and lookups then have the whole pool
-    mtl_sub_begin(); id<MTLBuffer> old_map = gmem_map(); CHECK("pool table made", old_map != nil); finish();
-    const uint64_t *ranges = old_map.contents; const uint32_t *words = old_map.contents;
+    mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
+    CHECK("no buffer address taken in the pool: the table does not take it whole", !g_big[0].full);
+    mtl_pool_buffer_addr(mem, GB);   // nvnMemoryPoolGetBufferAddress
+    mtl_sub_begin(); id<MTLBuffer> old_map = gmem_map(); CHECK("pool table made again", old_map != nil); finish();
+        const uint64_t *ranges = old_map.contents; const uint32_t *words = old_map.contents;
     CHECK("the least table, its count in entry 0", gmem_entries(old_map) == DMSH_GMEM_MAP_ENTRIES && words[4] == DMSH_GMEM_MAP_ENTRIES);
     uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
     const uint32_t *hint = words + (chunk % DMSH_GMEM_MAP_ENTRIES) * (DMSH_GMEM_MAP_ENTRY / sizeof(uint32_t)) + 6;
