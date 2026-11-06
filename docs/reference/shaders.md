@@ -1090,6 +1090,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** INC (`old >= b ? 0 : old + 1`) and DEC (`old == 0 || old > b ? b : old - 1`) are a compare-and-swap loop in `AAtoms`; `AAtomsCas` gives the old value when bit 87 is clear, 1 / 0 for CAST and CAST.SPIN as before (Fire Emblem Fortune's Weave's retry loop).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`SharedAtomics`: the three fail on `main`). A GPU cross-check of 400 LDS / STS / ATOMS from an nvdisasm-validated sm_86 corpus, run as one-thread compute shaders with the production options (debug and reduced on, MSL 2.3), against a reference: 84 mismatches (all INC, DEC and CAS) to none; the same on encodings from real compiled code.
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run. Also seen with `debug: false` (the AST optimizer, off by default): a shared store of 8 or 16 bits makes the translator throw, and an ATOMS whose result goes to RZ is dropped.
+### MUFU.SIN / COS argument reduction, and MUFU.TANH
+
+- **Symptom:** a periodic effect that drifts as its argument grows (an animation's `sin(time * speed)` off by about 1e-4 after a few thousand turns); a shader with `MUFU.TANH` refused (`MUFU op 9`).
+- **Cause:** since sm_70 MUFU.SIN and COS take turns, which NVIDIA reduces exactly. The translator multiplied the turns by 2pi in 32 bits, losing their fraction as they grew. Op 9 of MUFU is TANH (nvdisasm, sm_75 and later), not handled.
+- **Fix:** `ATurns` in `InstEmitAmpereAlu.cs` takes the angle from `x - floor(x)` (exact in 32 bits); `ATanh` computes `1 - 2 / (e^2x + 1)`, and `x` itself below 2^-10.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`MufuTurns`: the three fail on `main`). A GPU cross-check of 1,500 MUFU against `sin(2pi frac x)` and the other functions in double precision, with tolerances from PTX's `.approx` error bounds: 42 mismatches and 69 refusals (TANH) to 7-11, which are the sine / cosine of an infinity (0 instead of NaN: Metal's fast math) and EX2 results below 2^-126 (flushed by the GPU).
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
 ### A guarded load whose destination is its address
 

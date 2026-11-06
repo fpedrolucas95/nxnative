@@ -68,6 +68,25 @@ class SharedAtomics(Alu):
         success = r'bool _\d+ = int\(_\d+\) =='   # the old value compared with the expected one (not the swap loop's own test)
         self.assertRegex(spin, success)
         self.assertNotRegex(cas, success)
+class MufuTurns(Alu):
+    """MUFU.SIN / COS take turns (sm_70 and later): NVIDIA reduces them exactly, so the angle comes from x - floor(x); 2pi x in 32 bits lost the fraction as x grew
+    (a GPU cross-check against sin(2pi frac x): errors up to 7e-4 at a few thousand turns, none with the reduction). MUFU.TANH (op 9) is translated, not refused.
+    Encodings built from the sm_86 oracle corpus and checked with nvdisasm"""
+    SIN = (0x000fe20000000400, 0x0000001300067308)    # MUFU.SIN R6, R19
+    COS = (0x000fe20000000000, 0x0000001300067308)    # MUFU.COS R6, R19
+    TANH = (0x000fe20000002400, 0x0000001300067308)   # MUFU.TANH R6, R19
+
+    def test_sin_reduces_the_turns(self):
+        msl = self.kept(self.SIN, srcs=(19,))
+        self.assertIn('floor(', msl)
+        self.assertIn('sin(', msl)
+
+    def test_cos_reduces_the_turns(self):
+        self.assertIn('floor(', self.kept(self.COS, srcs=(19,)))
+
+    def test_tanh_is_translated(self):
+        msl = self.kept(self.TANH, srcs=(19,))
+        self.assertIn('exp2(', msl)
 
 
 class CompareFtz(Alu):
