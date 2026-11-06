@@ -370,6 +370,15 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     return src + '}\n'
 
 
+class RawRangesHinted(unittest.TestCase):
+    def test_hinted_helper_keeps_its_last_range(self):
+        from dmsh_wide import raw_ranges
+        result = raw_ranges(raw_hinted_source())
+        self.assertIn('struct dm_raw_range', result)
+        self.assertIn('if (_ra - _rr.s < _rr.e - _rr.s)', result)
+        self.assertIn('= as_type<int>(', result)   # the hint's entry word, as this tree's helper takes it
+
+
 class RawLoadQuadsHinted(unittest.TestCase):
     def test_hinted_table_and_offset_words(self):
         stock = raw_hinted_source()
