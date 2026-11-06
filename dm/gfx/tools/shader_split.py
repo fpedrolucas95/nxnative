@@ -217,9 +217,10 @@ def sead_prim_shaders(d, label):
     return out
 
 def ndsr_shaders(d, label):
-    """agl's NDSR pack (Lib/agl/agl_resource.*.sarc.zs agl_ndsr.pck, Donkey Kong Bananza: the dynamic super-resolution upscaler that writes the frame's output): 'NDSR', then from +0x10
-    16-byte records up to a zero one: u32 control section offset, u32 (control length << 4 | type), u32 code area offset, u32 (code length / 16 << 8 | type). Records whose first word
-    is an NVN2 control section are shaders (types 0 / 3 graphics, 6 compute; a vertex record is followed by its pixel record); the others (type 0xb, 0x50c) hold constant data.
+    """agl's NDSR pack (Lib/agl/agl_resource.*.sarc.zs agl_ndsr*.pck, Donkey Kong Bananza / Ocarina of Time: the dynamic super-resolution upscaler that writes the frame's output): 'NDSR', then
+    from +0x10 or +0x14 8-byte resource descriptors {u32 offset, u32 (length << 4 | type)} up to a zero one. A shader takes two descriptors (types 0 / 3 graphics, 6 compute for its NVN2 control
+    section, followed by types 1 / 4 / 7 for its code area; a vertex pair is followed by its pixel pair); constant-data descriptors (types 9, 0xa, 0xb, 0xc, 0xd, 0xe) take one 8-byte slot each
+    (agl_ndsr_vr.pck and agl_ndsr_vr_light.pck place a single type-9 descriptor after each of the first four compute shaders, shifting the second and fourth by 8 bytes).
     The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
     The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
     records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black.
@@ -242,6 +243,7 @@ def ndsr_shaders(d, label):
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)
         if st is None or check(label, st, ctl, code): continue
+        o += 8
         where = f'{label}#NDSR@{c:#x}'
         out.append((where, st, ctl, code))
         if st == 'vs': prog = where
@@ -2734,13 +2736,13 @@ def ue_shaders(d, label):
     return out
 
 def var_pairs(found):
-    """(vertex key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations).
+    """(vertex or mesh key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations).
     The tables stay separate; dmsh_build.py pads against both, as the pipeline prebuild uses both."""
     var = collections.defaultdict(dict)
     for where, st, ctl, code in found:
         g = where if '#var' in where else BAHS_VAR.get(where)
         if g: var[g][st] = skey(ctl, code)
-    return {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
+    return {(v[st], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() for st in ('vs', 'ms') if st in v and 'ps' in v}
 
 def scan_file(args):
     """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', why).

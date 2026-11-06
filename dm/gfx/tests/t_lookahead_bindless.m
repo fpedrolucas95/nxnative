@@ -36,7 +36,7 @@ static void program(prog_t *pg, uint64_t serial, int kind, int flag) {
     if (kind) { p->sh[1]->rf.nb = 1; p->sh[1]->rf.b[0] = (nvn_rbind){.kind = kind, .reg = 0}; }
     p->sh[1]->rf.bindless = flag == 1; p->sh[1]->rf.dyn = flag == 2;
     serial_put(serial, p);
-}
+}   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns p (serial_put's CFBridgingRetain) for the life of the test, not a leak
 
 // pass 1 draws A; pass 2 (target B) draws with `reader`; then A is attached again and cleared in full. The store decision of A at
 // the end of pass 1: 2 = redundant (dropped), anything else = kept.

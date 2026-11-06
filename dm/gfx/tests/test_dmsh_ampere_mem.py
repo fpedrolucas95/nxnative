@@ -643,6 +643,17 @@ class Pokopia(Translated):
     def test_membar_orders_memory(self):
         self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
 
+    EXIT_P0 = (0x000fea0003800000, 0x000000000000094d)  # @P0 EXIT
+    BAR_SYNC = (0x000fe20000000000, 0x0000000000007b1d) # BAR.SYNC
+
+    def test_early_return_before_barrier_participates_in_barrier(self):
+        # @P0 EXIT before BAR.SYNC: BarrierExits routes the early return through the barrier so no return precedes threadgroup_barrier
+        isept = (0x000fca0003f05070, 0x000000000300780c)   # ISETP.NE.AND P0, PT, R3, 0, PT
+        msl = self.shared_msl(isept, self.EXIT_P0, self.BAR_SYNC, self.LDS_PLAIN)
+        body = msl[msl.index('kernel void main0'):]
+        self.assertIn('threadgroup_barrier', body)
+        self.assertLess(body.index('threadgroup_barrier'), body.find('return;') if 'return;' in body else len(body))
+
 
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--fixture': raw_fixture(sys.argv[2]); sys.exit(0)

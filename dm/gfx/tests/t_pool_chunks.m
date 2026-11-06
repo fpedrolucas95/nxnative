@@ -150,5 +150,17 @@ int main(void) { @autoreleasepool {
     mtl_sub_begin(); map = gmem_map(); finish();
     CHECK("with the pools gone the table is the least again", gmem_entries(map) == DMSH_GMEM_MAP_ENTRIES);
     mtl_pool_del(small); mtl_drain();
+    // Contiguous small pools: Ocarina of Time (Switch 2) allocates 521 contiguous 64 KB pools for a 32.56 MB arena. The table grows to hold them (this tree does not merge them into
+    // runs, PR #1444's GMEM_RUN): each pool keeps an entry of its own, which the lookup finds
+    const int NRUN = 300; const uint64_t STEP = 65536;
+    uint8_t *contig = mmap(NULL, NRUN * STEP, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (contig == MAP_FAILED) abort();
+    for (int i = 0; i < NRUN; i++) { mtl_pool_add(contig + i * STEP, STEP); mtl_pool_buffer_addr(contig + i * STEP, STEP); }
+    mtl_sub_begin(); id<MTLBuffer> gmap = gmem_map(); finish();
+    int reached = 0;
+    for (int i = 0; i < NRUN; i++) { unsigned e = gmem_find(gmap, (uint64_t)(uintptr_t)(contig + i * STEP) + 100); const uint64_t *r = (const uint64_t *)gmap.contents + e * (DMSH_GMEM_MAP_ENTRY / sizeof(uint64_t));
+        reached += e && r[0] <= (uint64_t)(uintptr_t)(contig + i * STEP) && r[1] >= (uint64_t)(uintptr_t)(contig + (i + 1) * STEP); }
+    CHECK("300 contiguous 64 KB pools are each reached through the table", reached == NRUN);
+    for (int i = 0; i < NRUN; i++) mtl_pool_del(contig + i * STEP);
+    mtl_drain(); munmap(contig, NRUN * STEP); munmap(small, 64 * MB); munmap(mem, GB);
     printf("t_pool_chunks: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

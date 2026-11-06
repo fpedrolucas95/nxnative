@@ -289,10 +289,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand wordOffset = context.ShiftRightU32(offset, Const(2));
             Operand bitOffset = GetBitOffset(context, offset);
 
-            GenerateSharedAtomicCasLoop(context, wordOffset, id, (memValue) =>
-            {
-                return context.BitfieldInsert(memValue, value, bitOffset, Const(bitSize));
-            });
+            GenerateSharedAtomicCasLoop(
+                context,
+                wordOffset,
+                id,
+                (oldVal) => context.BitfieldInsert(oldVal, value, bitOffset, Const(bitSize)));
 
             context.Return();
 

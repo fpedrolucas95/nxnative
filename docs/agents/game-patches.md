@@ -597,7 +597,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: render scale. The game's own dynamic-resolution controller
 
-- **v0 `main`** `e0f3ccfa…` ([patches.py:26](../../dm/games/0400486024DEC000/patches.py#L26))
+- **1.1.1 `main`** `e0f3ccfa…` ([patches.py:26](../../dm/games/0400486024DEC000/patches.py#L26))
   - frame step `+0x805ff0`: scene scale = the host render scale (1.0 = the game's dynamic resolution)
   - render scale stub (the launcher offers DM_RENDER_SCALE)
 

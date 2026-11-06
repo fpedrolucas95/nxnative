@@ -1522,6 +1522,16 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_lookahead_bindless` indexes a three-pass submission with the production `mtl_sub_index` and asks `sdx_decide` at the end of the first pass: 5 of its 22 checks fail without the change (TEXU, TEXA, TEXD, bindless and dynamic reflection), none with it; a draw with no texture read or a slot read of another texture still drops the store.
 - **Found on:** no game: from the code, while looking at why the TBDR optimizations are off ([#159](https://github.com/seedds/nxnative/issues/159)).
 
+### Retired texture descriptors evicting live alias textures and rebuilding the bindless pool
+
+- **Symptom:** steady GPU memory growth (`newTextureWithDescriptor` at `nvn_mtl.m` creating tens of GB of textures across a few minutes), repeated full bindless texture pool rebuilds with `a change without a note` (`ser_gen` bumping without `alias_note`), and transparent ground patches where terrain blend maps read back zero.
+- **Cause:** two interactions in `nvn_mtl.m`:
+  1. `alias_take_over` bumped `g_ser_gen++` directly without recording the evicted serial in `g_alias_chg` (`alias_note`), so every takeover defeated incremental bindless pool patching (`pool_patch`) and forced a full scan of all registered texture IDs (`33,024` IDs in *Ocarina of Time*, taking up to `136 ms` on the submit thread).
+  2. During that full bindless pool scan (`tpool_get`), `treg_tex` resolved retired texture descriptors (`g_treg[id].retired != 0`) whose `MTLTexture` had been evicted from `g_serial` when a newer texture reused the same `(pool_id, off)` range. Calling `tex_mtl_` on a retired descriptor allocated a brand-new blank `MTLTexture`, inserted its serial into `g_ghost` (preventing `alias_sweep` from ever reclaiming it), and called `alias_take_over`, which evicted the live texture currently occupying `(pool_id, off)` in `g_alias` and replaced it with the blank texture. On the next bindless pool rebuild the evicted texture was recreated again, forming a self-sustaining churn loop (`50.8 GB` of textures created per 300 frames, `17.9 GB` resident RAM) and zeroing live terrain blend maps (`TerrainGround` fragment shaders then took their `<= 0.50186` `discard_fragment()` branch).
+- **Fix:** `alias_take_over` records evicted serials via `alias_note_evicted` so `pool_patch` patches affected bindless slots in place; `alias_take_over`, `alias_sweep` and `tex_by_id` mark retired `g_treg` entries whose storage has been taken over as `treg_gone`; and `tex_mtl_` refuses to recreate or ghost a retired descriptor when a live alias already overlaps its `(pool_id, off)` range (`alias_overlaps`).
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_upgrade_alias` verifies that `treg_tex` on a retired descriptor overlapping a live alias returns `nil` without allocating a new `MTLTexture`, keeps the live texture in `g_serial`, and marks the retired slot `gone`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`0400486024DEC000`, `v131072`).
+
 ### iOS layouts: portrait, a half-folded Duo, iPad windows
 
 - **Symptom:** portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass.

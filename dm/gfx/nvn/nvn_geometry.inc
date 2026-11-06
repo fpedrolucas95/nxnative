@@ -606,8 +606,12 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     uint64_t first = g_mtk.ind + 16;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first = b.gpuAddress + o; }
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
+              if (g_enc != en) return;
               if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first atIndex:DMSH_MESH_FIRST_SLOT]; }
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
+    if (g_enc != en) return;
+    if (ts) wk_note('t', ts->key);
+    wk_note('m', ms->key);
     enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first);
     MTLSize ot = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), mt = MTLSizeMake(ms->mesh_threads, 1, 1);
     if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:ot threadsPerMeshThreadgroup:mt];

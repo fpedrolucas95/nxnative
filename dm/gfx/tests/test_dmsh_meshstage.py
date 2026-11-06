@@ -40,8 +40,8 @@ def sph(pos=0xf0, generics=b''):
     return bytes(s)
 
 
-def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0):
-    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; struct.pack_into('<2H', c, 0x60, max_v, max_p)
+def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0, points=0):
+    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; c[0x5f] = points; struct.pack_into('<2H', c, 0x60, max_v, max_p)
     if prim_at: struct.pack_into('<I', c, 0x64, prim_at); c[0x68] = 0x80
     return bytes(c)
 
@@ -83,9 +83,9 @@ class Stage(unittest.TestCase):
         i = ms.info(control(6), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
 
-    def mesh(self, task=False, primitive=False, vertices=128, primitives=64):
-        area = sph(0xf0, b'\x30') + (sph(0, b'\x01') if primitive else b'')
-        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0), area)
+    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, points=False):
+        area = sph(0xf8 if points else 0xf0, b'\x30') + (sph(0, b'\x01') if primitive else b'')
+        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0, points=int(points)), area)
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), i
 
     def test_task_launches_what_it_wrote(self):
@@ -133,6 +133,15 @@ class Stage(unittest.TestCase):
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
         self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 0\.0, 1\.0\);')   # after the six vertex components
 
+    def test_point_mesh_and_point_size(self):   # Ocarina of Time's Foliage point mesh shaders (28f82c129deea140): SPH +0x35 bit 3 is PSize, control +0x5f == 1 is point topology
+        src, i = self.mesh(points=True, vertices=32, primitives=32)
+        self.assertTrue(i['points'])
+        self.assertIn('float point_size [[point_size]];', src)
+        self.assertIn('v.point_size = as_type<float>(_23[b + 128u]);', src)
+        self.assertRegex(src, r'v\.a1 = float4\(as_type<float>\(_23\[b \+ 160u\]\), as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 1\.0\);')
+        self.assertIn('metal::mesh<dm_vertex_t, void, 32, 32, metal::topology::point>', src)
+        self.assertIn('for (uint n = gl_LocalInvocationID.x; n < np; n += 32u)', src)
+
     def test_past_metal_refused(self):
         with self.assertRaises(ValueError): self.mesh(vertices=300)
 
@@ -146,7 +155,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0]]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(points=True, vertices=32, primitives=32)[0]]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

@@ -356,6 +356,9 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Check:** `t_audsmx` exercises domain IPC, ownership, validation, PCM conversion, gain and events; `t_audio_input_ring` covers wraparound, overflow and invalid cursors, both with ASan/UBSan. The explicit `make -C dm/host/tests GAME=<id> capture-device` hardware test received 96,480 nonzero samples and passed stop/suspend/resume/reset. `capture-service` consumed 57,600 frames (49,854 nonzero) through the actual microphone, service and shared ring, including wraparound and detach/close. The service, Apple backend and iOS front end compile against iPhoneOS 27.2 targeting iOS 26. iPhone hardware capture has not been tested.
 - **Open:** legacy AudioIn, output sysmix streams, free-space/clock notification modes and device-change notifications remain unsupported. The named input routes share the default microphone; dedicated voice processing and karaoke routing are not implemented. iPhone hardware and full game capture remain unvalidated.
 
+- **Fix:** `hle_audio.c` answers `ListVirtualInputDevices` with no devices, as `ListAudioIns` ([above](#no-audio-input-devices)): the host has no microphone.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), which lists them at boot.
+
 ### `OpenAudioOut` without a release event (SDK 22)
 
 - **Symptom:** `game called nn::diag abort: Result 0xe15, call site sdk+0x1f8704`, i.e. inside `nn::audio::CreateAudioOutManagerByHipc+0xb4`, before any audio device opened.

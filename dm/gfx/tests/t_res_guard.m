@@ -61,14 +61,16 @@ static void eviction(void) {
     CHECK(w_live && w_dead && w_seen && view.parentTexture == w_base, "the textures");
     mtl_sub_commit(); mtl_drain();
     mtl_tex_release(&dead); mtl_tex_release(&seen); mtl_tex_release(&base);
-    for (int i = 0; i < ALIAS_IDLE; i++) settle();
+    // ALIAS_IDLE (512) submissions: the periodic idle eviction (idle_evict_periodic, every 512 fences) may let the idle entry go on the way, so the count is taken before them.
+    // The entry a lookup keeps finding is looked up again in each
     alias_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)&pool; k.off = seen.off; k.d = seen.d;
+    uint64_t idle = g_alias_idle, gen = g_ser_gen;
+    for (int i = 0; i < ALIAS_IDLE; i++) { pthread_mutex_lock(&g_smu); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu); settle(); }
     pthread_mutex_lock(&g_smu); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);   // a lookup just now
     id<MTLBuffer> staging = [g_dev newBufferWithLength:1 << 20 options:MTLResourceStorageModePrivate]; res_add(staging); g_up_slot_blk[1] = staging; __weak id<MTLBuffer> w_staging = staging; staging = nil;
-    uint64_t idle = g_alias_idle, gen = g_ser_gen;
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     guard_evict(1);
-    CHECK(g_alias_idle == idle + 1 && g_ser_gen == gen + 1, "one entry left, one bump");
+    CHECK(g_alias_idle == idle + 1 && g_ser_gen > gen, "one entry left, and the serial generation moved");
     settle();
     CHECK(!w_dead, "the idle entry nothing holds is gone");
     CHECK(w_live && in_set(w_live), "a live object's texture stays, and stays resident");

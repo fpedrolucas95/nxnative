@@ -11,8 +11,11 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 
+// One GPU-only pool for every texture: storage outside any pool is shared by nothing (alias_take_over returns at once, PR #1444)
+static uint8_t g_store[1 << 20];
+static pool_t g_pool = {.magic = MAGIC('P','O','O','L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, .mem = g_store, .size = sizeof g_store};
 static tex_t tex(uint64_t serial, NVNformat format, int w) {
-    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial};
+    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial, .pool = &g_pool, .mem = g_store};
     t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = w, .depth = 1, .levels = 1, .samples = 1};
     nvn_tex_layout(&t.d, &t.L);
     return t;

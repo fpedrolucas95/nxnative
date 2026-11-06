@@ -48,7 +48,6 @@ dm/gfx/tests/t_geometry.m	clang-analyzer-osx.cocoa.RetainCount	2
 dm/gfx/tests/t_geometry.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/tests/t_geometry.m	clang-analyzer-unix.cstring.UninitializedRead	2
 dm/gfx/tests/t_geometry_feedback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/tests/t_geometry_feedback.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_geometry_primitive_id.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_image_alias.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_initial_uncached.m	clang-analyzer-nullability.NullablePassedToNonnull	1
@@ -69,7 +68,7 @@ dm/gfx/tests/t_primitive_restart.m	clang-analyzer-unix.cstring.UninitializedRead
 dm/gfx/tests/t_pso_archive.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_pso_archive.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_pso_bundle.m	bugprone-command-processor	1
-dm/gfx/tests/t_pso_pending.m	clang-analyzer-osx.cocoa.RetainCount	2
+dm/gfx/tests/t_pso_pending.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_pso_skey.m	bugprone-suspicious-memory-comparison	5
 dm/gfx/tests/t_pso_stall.m	bugprone-command-processor	1
 dm/gfx/tests/t_pso_stall.m	clang-analyzer-nullability.NullablePassedToNonnull	1

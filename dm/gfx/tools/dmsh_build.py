@@ -17,11 +17,12 @@ dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
-CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
+CHAIN = os.environ.get('DMSH_CHAIN_OVERRIDE') or dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
 INPUTS = dmsh_chain.inputs(GAME)   # the digest of the profile's inputs, which a full build stamps on its libraries (b-<V>/inputs.tsv)
 XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
+if not os.environ.get('DOTNET_ROOT') and os.path.isdir('/opt/homebrew/opt/dotnet/libexec'): os.environ['DOTNET_ROOT'] = '/opt/homebrew/opt/dotnet/libexec'
 SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
@@ -50,6 +51,24 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+# Loop guard: every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
+# process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
+# cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+LOOP_CAP = 1 << 18
+def loop_guard(msl):
+    lines, out = msl.split('\n'), []
+    cap = f'++dm_lg < {LOOP_CAP}u'
+    for i, l in enumerate(lines):
+        if l == '{' and i and lines[i - 1].rstrip().endswith(')'):   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+            out += [l, '    uint dm_lg = 0u; (void)dm_lg;']; continue
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
+        elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        out.append(l)
+    return '\n'.join(out)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks) reaches the MSL as a call of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1, out D1) → D0, with
 # the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma, TensorPass, HelperFunctionManager.GenerateHmma16816F16). The
@@ -1022,7 +1041,7 @@ def build_keys(want, locations, pairs):
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
 
 def vs_pad(key, src):
-    """Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
+    """Give a vertex or mesh shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
     Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
@@ -1032,8 +1051,16 @@ def vs_pad(key, src):
         if os.path.exists(fn):
             with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
+    if not miss: return src, []
+    mi = src.find('struct dm_vertex_t {\n')
+    if mi >= 0:
+        mj = src.find('};\n', mi)
+        if mj < 0 or 'dm_out.set_vertex(n, v);' not in src: return src, []
+        src = src[:mj] + ''.join(f'    float4 dm_pad{l} [[user(locn{l})]];\n' for l in miss) + src[mj:]
+        init = ''.join(f'        v.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);\n' for l in miss)
+        return src.replace('        dm_out.set_vertex(n, v);\n', init + '        dm_out.set_vertex(n, v);\n'), miss
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
-    if not miss or i < 0 or j < 0 or k < 0: return src, []
+    if i < 0 or j < 0 or k < 0: return src, []
     src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
     k = src.find('main0_out out = {};') + len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
@@ -1321,7 +1348,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))
         res = json.load(open(os.path.join(w, k + '.res.json')))
         plain = raw_log_opt(key, 'gs', plain, res)
         src = dmsh_geometry.capture_input(plain)
@@ -1352,7 +1379,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1364,6 +1391,24 @@ def geometry_finish(key, w, j, c1):
             save('_bgv', full, meta)
     return 'ok', '', base
 
+
+TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+def tg_fence(src):
+    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
+    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
+    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
+    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
+    threadgroup array are touched"""
+    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
+    if not names: return src
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\]\s*=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    out = []
+    for ln in src.split('\n'):
+        out.append(ln)
+        m = store.match(ln)
+        if m: out.append(m.group(1) + TG_FENCE)
+    return '\n'.join(out)
 
 def finish(key, w, j, c1):
     name, k = loc[key]
@@ -1408,6 +1453,7 @@ def finish(key, w, j, c1):
         raw = [(i, b) for i, b in enumerate(sbufs) if b['cb_slot'] == abi.GMEM_MAP_CB_SLOT]
         if len(raw) == 1 and raw[0][1]['cb_offset'] == 0 and not raw[0][1]['flags'] & 1:
             src = dmsh_wide.raw_load_quads(src, raw[0][0], abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY, abi.GMEM_HINT_SHIFT)
+    src = tg_fence(src)   # warp-synchronous shared memory: a simdgroup-scope fence after each threadgroup store (see tg_fence)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
@@ -1420,10 +1466,11 @@ def finish(key, w, j, c1):
         try: src, spill = tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
         if spill: open(msl, 'w').write(src)
+    src = loop_guard(src); open(msl, 'w').write(src)   # no loop can run forever (see loop_guard); after to_stage so _KERNEL still sees stage memory first in main0
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
-    if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
+    if (j['stage'] == 'vs' or (mesh and mesh['kind'] == 'ms')) and PAIRS.get(key):   # outputs the pixel shader reads but the vertex or mesh shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False

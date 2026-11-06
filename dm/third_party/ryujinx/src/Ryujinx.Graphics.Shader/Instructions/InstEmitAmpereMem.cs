@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x9a9, InstName.Atom, AAtomgCas, N);
             x(0x3a9, InstName.Atom, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);

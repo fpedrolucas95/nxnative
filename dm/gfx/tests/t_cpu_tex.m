@@ -110,6 +110,10 @@ static void finalized_upload(int write_after_record) {
     h_nvnTextureFinalize(&tex);
     CHECK(mtl_cpu_tex_count() == 0, "finalized texture leaves the live CPU set");
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "finalization retires every descriptor's cached views");
+    {   __unsafe_unretained id<MTLBuffer> pb = nil;
+        mtl_sub_begin(); pool_gpu(0, MTLTextureType2D, 0, 0, &pb);
+        CHECK(!g_treg[1].view && !tex_get(serial), "pool table walk does not re-upload an unbound retired packaged texture");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "pool table submission completed"); }
     // Reuse the API object: commands and registered descriptors must use their snapshots.
     memset(&tex, 0xa5, sizeof tex);
     state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
@@ -158,13 +162,13 @@ static void finalized_bindless_pool(void) {
     os_unfair_lock_lock(&g_rmu);
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &a);
     uint64_t first = ((const uint64_t *)((const char *)a.contents + DMSH_POOL_HEAD))[FIRST];
-    CHECK(g_pkg_uploads == uploads + N && g_ghost_active.n == N, "one upload per retired descriptor in the first pool walk");
+    CHECK(g_pkg_uploads == uploads && g_ghost_active.n == 0, "a retired CPU-written descriptor without a view gets no texture in the pool walk (pool_entry, PR #1444)");
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &b);
     uint64_t again = ((const uint64_t *)((const char *)b.contents + DMSH_POOL_HEAD))[FIRST];
     os_unfair_lock_unlock(&g_rmu);
-    CHECK(first == again && g_pkg_uploads == uploads + N, "rebuilding the pool preserves textures that spilled out of the ghost ring");
+    CHECK(first == again && g_pkg_uploads == uploads, "rebuilding the pool gives the same entries and uploads nothing");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "bindless pool uploads completed");
-    CHECK(!g_ghost_active.n && g_ghost.n == NGHOST && !g_treg[FIRST].view, "submission drops its pins and transient views and keeps the bounded ghost cache");
+    CHECK(!g_ghost_active.n && !g_treg[FIRST].view, "the submission leaves no pins or views behind");
     for (int i = 0; i < N; i++) mtl_reg_tex(FIRST + i, NULL, NULL);
     h_nvnMemoryPoolFinalize(&pool);
     defer_drain(); munmap(mem, len);
