@@ -734,3 +734,10 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** that last step unwraps an `NvPkg` as `tex_made` does (its `view`, else its `tex`) and prints the `[RED]` line once, naming the serial. The trigger is not fixed.
 - **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in PR #1299), WOB2020's report on PR #1299 (M3 Max, 412 s into Kokiri Forest, right after a save commit).
 - **Check:** `t_cpu_tex --metal` (`packaged_entry_outside_the_set`: a packaged texture whose serial is deleted from the set; without the fix `tex_mtl` returns the `NvPkg` and `-[NvPkg width]` throws).
+### Whole-pool mappings leave obsolete chunks resident
+
+- **Symptom:** a large pool keeps both its contiguous raw-address mapping and earlier overlapping chunks resident.
+- **Cause:** `gmem_map_gpu` adds the whole-pool buffer without retiring the chunk entries or older chunk replacements. They remain referenced for the parent pool's lifetime.
+- **Fix:** after whole-map creation succeeds, remove obsolete entries and queue their buffers through the existing fence-deferred release. Repair the moved entries' chunk/full indices, clear obsolete chunk indices and invalidate address caches. A refused whole mapping leaves existing chunks intact.
+- **Found on:** Ocarina of Time scene-load memory investigation (#1299). This complements #1319's earlier retirement of replaced chunks; it does not change chunk thresholds or raw-address exposure policy.
+- **Check:** `t_pool_retire` covers two large pools, a separate small pool, a lengthened chunk, consolidation, fence-delayed residency removal, repaired lookups and a GPU copy from the surviving whole mapping. No isolated game-memory or FPS saving is claimed.
