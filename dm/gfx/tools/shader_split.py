@@ -243,7 +243,6 @@ def ndsr_shaders(d, label):
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)
         if st is None or check(label, st, ctl, code): continue
-        o += 8
         where = f'{label}#NDSR@{c:#x}'
         out.append((where, st, ctl, code))
         if st == 'vs': prog = where
