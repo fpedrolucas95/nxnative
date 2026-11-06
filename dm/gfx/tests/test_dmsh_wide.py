@@ -6,9 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from dmsh_wide import wide_loads   # noqa: E402
+import dmsh_chain  # noqa: E402
+from dmsh_wide import raw_load_quads, wide_loads   # noqa: E402
 
 # Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
 # and words in two blocks
@@ -126,6 +128,275 @@ class WideLoads(unittest.TestCase):
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', m, '-o', os.path.join(d, name + '.air')],
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
+
+
+def raw_source(entries):
+    """Synthetic fixed-table helper and four words of a raw 128-bit load."""
+    prefix = '''
+struct _10 { uint _m0[1]; };
+struct spvDescriptorSetBuffer0
+{
+    device _10* cp_s5 [[id(7)]];
+};
+static inline __attribute__((always_inline))
+int _900(thread const int& _1, thread const int& _2, device _10& cp_s5)
+{
+'''
+    next_id = 100
+    previous = '0'
+    for bit in reversed(range(entries.bit_length() - 1)):
+        probe, row, li, low, hi, high, less, equal, lo_le, tied, take, index = (
+            f'_{i}' for i in range(next_id, next_id + 12))
+        prefix += f'''    int {probe} = {previous} + {1 << bit};
+    int {row} = {probe} * 8;
+    int {li} = {row} + 0;
+    float {low} = as_type<float>(cp_s5._m0[{li}]);
+    int {hi} = {row} + 1;
+    float {high} = as_type<float>(cp_s5._m0[{hi}]);
+    bool {less} = as_type<uint>({high}) < uint(_2);
+    bool {equal} = as_type<int>({high}) == _2;
+    bool {lo_le} = as_type<uint>({low}) <= uint(_1);
+    bool {tied} = {equal} && {lo_le};
+    bool {take} = {less} || {tied};
+    int {index} = {take} ? {probe} : {previous};
+'''
+        previous = index
+        next_id += 12
+    prefix += f'''    int _310 = {previous} * 8;
+    int _311 = _310 + 2;
+    float _312 = as_type<float>(cp_s5._m0[_311]);
+    int _313 = _310 + 3;
+    float _314 = as_type<float>(cp_s5._m0[_313]);
+    bool _315 = uint(_2) < as_type<uint>(_314);
+    bool _316 = _2 == as_type<int>(_314);
+    bool _317 = uint(_1) < as_type<uint>(_312);
+    bool _318 = _316 && _317;
+    bool _319 = _315 || _318;
+    if (_319)
+    {{
+        int _320 = _310 + 4;
+        float _321 = as_type<float>(cp_s5._m0[_320]);
+        int _322 = _1 + as_type<int>(_321);
+        bool _323 = uint(_322) < uint(_1);
+        int _324 = int(_323);
+        int _325 = _310 + 5;
+        float _326 = as_type<float>(cp_s5._m0[_325]);
+        int _327 = _2 + as_type<int>(_326);
+        int _328 = _327 + _324;
+        uint _329 = *(reinterpret_cast<device uint*>(as_type<ulong>(uint2(uint(_322), uint(_328)))));
+        float _330 = as_type<float>(_329);
+        return as_type<int>(_330);
+    }}
+    return 0;
+}}
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint id [[thread_position_in_grid]])
+{{
+    int _500 = int(id);
+    int _501 = 4;
+'''
+    for i, offset in enumerate((4, 8, 12)):
+        lo, wraps, carry, hi = (500 + 4 * (i + 1) + j for j in range(4))
+        prefix += f'''    int _{lo} = _500 + {offset};
+    bool _{wraps} = uint(_{lo}) < uint(_500);
+    int _{carry} = int(_{wraps});
+    int _{hi} = _501 + _{carry};
+'''
+    for i, (lo, hi) in enumerate(((500, 501), (504, 507), (508, 511), (512, 515))):
+        low, high, out = 600 + i * 3, 601 + i * 3, 602 + i * 3
+        prefix += f'''    int _{low} = _{lo};
+    int _{high} = _{hi};
+    int _{out} = _900(_{low}, _{high}, (*spvDescriptorSet0.cp_s5));
+'''
+    return prefix + '}\n'
+
+
+class RawLoadQuads(unittest.TestCase):
+    def test_opt_in_changes_chain(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(dmsh_chain.raw_load_quads())
+            command = [sys.executable, dmsh_chain.__file__]
+            original = subprocess.check_output(command)
+            os.environ['DMSH_RAW_LOAD_QUADS'] = '1'
+            self.assertTrue(dmsh_chain.raw_load_quads())
+            self.assertNotEqual(subprocess.check_output(command), original)
+
+    def test_known_layouts(self):
+        for entries in (4096, 8192):
+            with self.subTest(entries=entries):
+                stock = raw_source(entries)
+                result = raw_load_quads(stock, 5, entries, 32)
+                self.assertIn(f'index < {entries - 1}u ?', result)
+                self.assertIn('next > address + 15ul', result)
+                self.assertIn('end - address >= 16ul', result)
+                self.assertIn('dm_raw_load4(_600, _601, (*spvDescriptorSet0.cp_s5))', result)
+                for ident, component in zip((602, 605, 608, 611), 'xyzw'):
+                    self.assertIn(f'int _{ident} = _602_words.{component};', result)
+                self.assertEqual(result.count('return _900(low, high, table);'), 1)
+                self.assertEqual(result.count('_words = dm_raw_load4'), 1)
+                self.assertEqual(raw_load_quads(result, 5, entries, 32), result)
+
+    def test_unrecognized_layout_stays_scalar(self):
+        stock = raw_source(4096)
+        for slot, entries, entry_bytes in ((4, 4096, 32), (5, 8192, 32), (5, 4096, 16), (5, 7, 32)):
+            self.assertEqual(raw_load_quads(stock, slot, entries, entry_bytes), stock)
+        for old, new in (('uint _m0[1]', 'float _m0[1]'),
+                         ('device _10* cp_s5 [[id(7)]]', 'device _11* cp_s5 [[id(7)]]'),
+                         ('return 0;', 'return 1;'),
+                         ('< uint(_2);', '<= uint(_2);'),
+                         ('int _320 = _310 + 4;', 'int _320 = _310 + 5;')):
+            bad = stock.replace(old, new, 1)
+            self.assertNotEqual(bad, stock)
+            self.assertEqual(raw_load_quads(bad, 5, 4096, 32), bad)
+
+    def test_unproven_words_stay_scalar(self):
+        stock = raw_source(4096)
+        for old, new in (('int _504 = _500 + 4;', 'int _504 = _500 + 6;'),
+                         ('uint(_504) < uint(_500)', 'uint(_504) <= uint(_500)'),
+                         ('int _500 = int(id);', 'float _500 = float(id);'),
+                         ('int _603 = _504;', 'unknown_effect(_504);\n    int _603 = _504;'),
+                         ('int _603 = _504;', 'threadgroup_barrier(mem_flags::mem_device);\n    int _603 = _504;'),
+                         ('int _603 = _504;', 'table[0] = 7;\n    int _603 = _504;'),
+                         ('int _600 = _500;', 'int _999 = (_500 += 1);\n    int _600 = _500;'),
+                         ('int _600 = _500;', 'int _999 = unknown_effect(_500);\n    int _600 = _500;'),
+                         ('_900(_603, _604, (*spvDescriptorSet0.cp_s5))',
+                          '_900(_603, _604, (*spvDescriptorSet0.cp_s3))')):
+            bad = stock.replace(old, new, 1)
+            with self.subTest(change=new):
+                self.assertNotEqual(bad, stock)
+                self.assertEqual(raw_load_quads(bad, 5, 4096, 32), bad)
+
+
+def raw_hinted_source():
+    """Synthetic hinted-table helper (one hint per 2 MiB chunk, then a binary search over the table's own count) and four words at 16..28 bytes past
+    one 64-bit value, each word with its own carry, as the current translator writes them."""
+    src = """
+struct _21 { uint _m0[1]; };
+struct spvDescriptorSetBuffer0
+{
+    device _21* cp_s3 [[id(3)]];
+};
+static inline __attribute__((always_inline))
+int _46(thread const int& _1, thread const int& _2, device _21& cp_s3)
+{
+    int _13 = _2 << 11;
+    uint _15 = uint(int(uint(_1) >> uint(21)));
+    int _17 = _13 | int(_15);
+    int _19 = _17 & 4095;
+    int _20 = _19 * 8;
+    int _23 = _20 + 7;
+    float _25 = as_type<float>(cp_s3._m0[_23]);
+    bool _27 = as_type<int>(_25) != 0;
+    int _29 = _20 + 6;
+    float _31 = as_type<float>(cp_s3._m0[_29]);
+    bool _33 = as_type<int>(_31) == _17;
+    bool _35 = _27 && _33;
+    bool _37 = uint(_2) < 2097152u;
+    bool _39 = _35 && _37;
+    int _41 = as_type<int>(_25);
+    if (!_39)
+    {
+        int _43 = 0;
+        int _45 = 0 + 4;
+        float _47 = as_type<float>(cp_s3._m0[_45]);
+        uint _49 = uint(int(uint(as_type<int>(_47)) >> uint(1)));
+        int _51 = int(_49);
+        bool _53;
+        do
+        {
+            int _55 = _43 + _51;
+            int _57 = _55 * 8;
+            int _59 = _57 + 0;
+            float _61 = as_type<float>(cp_s3._m0[_59]);
+            int _63 = _57 + 1;
+            float _65 = as_type<float>(cp_s3._m0[_63]);
+            bool _67 = as_type<uint>(_65) < uint(_2);
+            bool _69 = as_type<int>(_65) == _2;
+            bool _71 = as_type<uint>(_61) <= uint(_1);
+            bool _73 = _69 && _71;
+            bool _75 = _67 || _73;
+            int _77 = _75 ? _55 : _43;
+            _43 = _77;
+            uint _79 = uint(int(uint(_51) >> uint(1)));
+            _51 = int(_79);
+            _53 = _51 != 0;
+        } while (_53);
+        _41 = _43;
+    }
+    int _81 = _41 * 8;
+    int _83 = _81 + 2;
+    float _85 = as_type<float>(cp_s3._m0[_83]);
+    int _87 = _81 + 3;
+    float _89 = as_type<float>(cp_s3._m0[_87]);
+    bool _91 = uint(_2) < as_type<uint>(_89);
+    bool _93 = _2 == as_type<int>(_89);
+    bool _95 = uint(_1) < as_type<uint>(_85);
+    bool _97 = _93 && _95;
+    bool _99 = _91 || _97;
+    if (_99)
+    {
+        int _101 = _81 + 4;
+        float _103 = as_type<float>(cp_s3._m0[_101]);
+        int _105 = _1 + as_type<int>(_103);
+        bool _107 = uint(_105) < uint(_1);
+        int _109 = int(_107);
+        int _111 = _81 + 5;
+        float _113 = as_type<float>(cp_s3._m0[_111]);
+        int _115 = _2 + as_type<int>(_113);
+        int _117 = _115 + _109;
+        uint _119 = *(reinterpret_cast<device uint*>(as_type<ulong>(uint2(uint(_105), uint(_117)))));
+        float _121 = as_type<float>(_119);
+        return as_type<int>(_121);
+    }
+    return 0;
+}
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint id [[thread_position_in_grid]])
+{
+    float _649 = as_type<float>(id);
+    float _651 = as_type<float>(id + 1u);
+"""
+    for i, offset in enumerate((16, 20, 24, 28)):
+        lo, wraps, carry, hi = (700 + 4 * i + j for j in range(4))
+        src += f"""    int _{lo} = as_type<int>(_649) + {offset};
+    bool _{wraps} = uint(_{lo}) < as_type<uint>(_649);
+    int _{carry} = int(_{wraps});
+    int _{hi} = as_type<int>(_651) + _{carry};
+"""
+    for i in range(4):
+        low, high, out = 800 + i * 3, 801 + i * 3, 802 + i * 3
+        src += f"""    int _{low} = _{700 + 4 * i};
+    int _{high} = _{703 + 4 * i};
+    int _{out} = _46(_{low}, _{high}, (*spvDescriptorSet0.cp_s3));
+"""
+    return src + '}\n'
+
+
+class RawLoadQuadsHinted(unittest.TestCase):
+    def test_hinted_table_and_offset_words(self):
+        stock = raw_hinted_source()
+        result = raw_load_quads(stock, 3, 4096, 32, 21)
+        self.assertIn('index + 1u < table._m0[4] ?', result)
+        self.assertIn('(address >> 21) == ((address + 15ul) >> 21)', result)
+        self.assertIn('int4 _802_words = dm_raw_load4(_800, _801, (*spvDescriptorSet0.cp_s3));', result)
+        for ident, component in zip((802, 805, 808, 811), 'xyzw'):
+            self.assertIn(f'int _{ident} = _802_words.{component};', result)
+        self.assertEqual(raw_load_quads(result, 3, 4096, 32, 21), result)
+        self.assertEqual(raw_load_quads(stock, 3, 4096, 32), stock)   # the hinted form only with its shift
+
+    def test_hinted_unproven_stays_scalar(self):
+        stock = raw_hinted_source()
+        for old, new in (('int _704 = as_type<int>(_649) + 20;', 'int _704 = as_type<int>(_649) + 22;'),
+                         ('bool _705 = uint(_704) < as_type<uint>(_649);', 'bool _705 = uint(_704) < as_type<uint>(_651);'),
+                         ('int _707 = as_type<int>(_651) + _706;', 'int _707 = as_type<int>(_649) + _706;'),
+                         ('int _13 = _2 << 11;', 'int _13 = _2 << 12;'),
+                         ('int _19 = _17 & 4095;', 'int _19 = _17 & 8191;'),
+                         ('bool _37 = uint(_2) < 2097152u;', 'bool _37 = uint(_2) < 4194304u;'),
+                         ('int _45 = 0 + 4;', 'int _45 = 0 + 5;'),
+                         ('int _803 = _704;', 'table[0] = 7;\n    int _803 = _704;'),
+                         ('int _803 = _704;', 'int _999 = (_649 += 1);\n    int _803 = _704;')):
+            bad = stock.replace(old, new, 1)
+            with self.subTest(change=new):
+                self.assertNotEqual(bad, stock)
+                self.assertEqual(raw_load_quads(bad, 3, 4096, 32, 21), bad)
 
 
 if __name__ == '__main__':

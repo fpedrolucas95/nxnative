@@ -1402,6 +1402,12 @@ def finish(key, w, j, c1):
     try: src = raw_log_opt(key, j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    if dmsh_chain.raw_load_quads() and j['stage'] == 'cs' and j.get('arch') == 'sm86' and not j.get('mesh_stage'):
+        sbufs = sorted(res['sbufs'], key=lambda b: b['binding'])
+        raw = [(i, b) for i, b in enumerate(sbufs) if b['cb_slot'] == abi.GMEM_MAP_CB_SLOT]
+        if len(raw) == 1 and raw[0][1]['cb_offset'] == 0 and not raw[0][1]['flags'] & 1:
+            src = dmsh_wide.raw_load_quads(src, raw[0][0], abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY, abi.GMEM_HINT_SHIFT)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

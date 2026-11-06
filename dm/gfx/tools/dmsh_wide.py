@@ -73,3 +73,351 @@ def wide_loads(msl):
         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
         lines[i] = ''.join(indent + d + '\n' for d in pre) + ln
     return '\n'.join(lines)
+
+
+# Unlike a bound storage word, each raw word independently selects a guest-memory
+# range. Only reuse that selection when all four accesses choose the same range.
+_RAW_ID = r'_\d+'
+_RAW_FUNCTION = re.compile(
+    r'(?m)^static inline __attribute__\(\(always_inline\)\)\n'
+    rf'int (?P<name>{_RAW_ID})\(thread const int& (?P<lo>{_RAW_ID}), '
+    rf'thread const int& (?P<hi>{_RAW_ID}), device (?P<type>{_RAW_ID})& (?P<table>{_BUF})\)\n'
+    r'\{\n(?P<body>.*?)^\}', re.S)
+
+
+# The scalar helper's search, line by line, in the two forms the translator writes: a fixed table walked by an unrolled binary search, and the hinted table
+# (dmsh_abi.h DMSH_GMEM_HINT_SHIFT): the 2 MiB chunk's hint entry first, else a binary search over the count entry 0's delta holds. Both end in the same tail.
+_RAW_FIXED_STEP = (
+    r'int @probe = @previous \+ @step;',
+    r'int @row = @probe \* @stride;',
+    r'int @lindex = @row \+ 0;',
+    r'float @lbits = as_type<float>\(@table\._m0\[@lindex\]\);',
+    r'int @hindex = @row \+ 1;',
+    r'float @hbits = as_type<float>\(@table\._m0\[@hindex\]\);',
+    r'bool @lower = as_type<uint>\(@hbits\) < uint\(@hi\);',
+    r'bool @equal = as_type<int>\(@hbits\) == @hi;',
+    r'bool @low_le = as_type<uint>\(@lbits\) <= uint\(@lo\);',
+    r'bool @same = @equal && @low_le;',
+    r'bool @take = @lower \|\| @same;',
+    r'int @index = @take \? @probe : @previous;',
+)
+_RAW_HINTED = (
+    r'int @key_hi = @hi << @key_shift;',
+    r'uint @key_lo = uint\(int\(uint\(@lo\) >> uint\(@chunk\)\)\);',
+    r'int @key = @key_hi \| int\(@key_lo\);',
+    r'int @slot = @key & @mask;',
+    r'int @hrow = @slot \* @stride;',
+    r'int @hidx_i = @hrow \+ 7;',
+    r'float @hidx = as_type<float>\(@table\._m0\[@hidx_i\]\);',
+    r'bool @hnz = as_type<int>\(@hidx\) != 0;',
+    r'int @hkey_i = @hrow \+ 6;',
+    r'float @hkey = as_type<float>\(@table\._m0\[@hkey_i\]\);',
+    r'bool @hsame = as_type<int>\(@hkey\) == @key;',
+    r'bool @hboth = @hnz && @hsame;',
+    r'bool @hrange = uint\(@hi\) < @limitu;',
+    r'bool @hok = @hboth && @hrange;',
+    r'int @index = as_type<int>\(@hidx\);',
+    r'if \(!@hok\)',
+    r'\{',
+    r'int @cur = 0;',
+    r'int @cnt_i = 0 \+ 4;',
+    r'float @cnt = as_type<float>\(@table\._m0\[@cnt_i\]\);',
+    r'uint @half = uint\(int\(uint\(as_type<int>\(@cnt\)\) >> uint\(1\)\)\);',
+    r'int @step = int\(@half\);',
+    r'bool @more;',
+    r'do',
+    r'\{',
+    r'int @probe = @cur \+ @step;',
+    r'int @row = @probe \* @stride;',
+    r'int @lindex = @row \+ 0;',
+    r'float @lbits = as_type<float>\(@table\._m0\[@lindex\]\);',
+    r'int @hindex = @row \+ 1;',
+    r'float @hbits = as_type<float>\(@table\._m0\[@hindex\]\);',
+    r'bool @lower = as_type<uint>\(@hbits\) < uint\(@hi\);',
+    r'bool @equal = as_type<int>\(@hbits\) == @hi;',
+    r'bool @low_le = as_type<uint>\(@lbits\) <= uint\(@lo\);',
+    r'bool @same = @equal && @low_le;',
+    r'bool @take = @lower \|\| @same;',
+    r'int @pick = @take \? @probe : @cur;',
+    r'@cur = @pick;',
+    r'uint @next_half = uint\(int\(uint\(@step\) >> uint\(1\)\)\);',
+    r'@step = int\(@next_half\);',
+    r'@more = @step != 0;',
+    r'\} while \(@more\);',
+    r'@index = @cur;',
+    r'\}',
+)
+_RAW_TAIL = (
+    r'int @row = @index \* @stride;',
+    r'int @end_l = @row \+ 2;',
+    r'float @end_lb = as_type<float>\(@table\._m0\[@end_l\]\);',
+    r'int @end_h = @row \+ 3;',
+    r'float @end_hb = as_type<float>\(@table\._m0\[@end_h\]\);',
+    r'bool @end_high = uint\(@hi\) < as_type<uint>\(@end_hb\);',
+    r'bool @end_equal = @hi == as_type<int>\(@end_hb\);',
+    r'bool @end_low = uint\(@lo\) < as_type<uint>\(@end_lb\);',
+    r'bool @end_same = @end_equal && @end_low;',
+    r'bool @inside = @end_high \|\| @end_same;',
+    r'if \(@inside\)',
+    r'\{',
+    r'int @delta_l = @row \+ 4;',
+    r'float @delta_lb = as_type<float>\(@table\._m0\[@delta_l\]\);',
+    r'int @host_l = @lo \+ as_type<int>\(@delta_lb\);',
+    r'bool @wrap = uint\(@host_l\) < uint\(@lo\);',
+    r'int @carry = int\(@wrap\);',
+    r'int @delta_h = @row \+ 5;',
+    r'float @delta_hb = as_type<float>\(@table\._m0\[@delta_h\]\);',
+    r'int @high_sum = @hi \+ as_type<int>\(@delta_hb\);',
+    r'int @host_h = @high_sum \+ @carry;',
+    r'uint @word = \*\(reinterpret_cast<device uint\*>\(as_type<ulong>\(uint2\(uint\(@host_l\), uint\(@host_h\)\)\)\)\);',
+    r'float @bits = as_type<float>\(@word\);',
+    r'return as_type<int>\(@bits\);',
+    r'\}',
+    r'return 0;',
+)
+
+
+def _raw_search(body, low, high, table, entries, stride, hint_shift=None):
+    """Verify the scalar helper (either form) and return its unmodified search prefix, the name of the entry index it selects, and the form."""
+    lines = body.splitlines()
+
+    def attempt(form):
+        names = {'lo': low, 'hi': high, 'table': table, 'stride': str(stride), 'previous': '0'}
+        pos = 0
+
+        def match(template):
+            nonlocal pos
+            line = lines[pos] if pos < len(lines) else ''
+            pattern = re.sub(r'@([a-z_]+)', lambda m: re.escape(names[m[1]]) if m[1] in names else
+                             rf'(?P<{m[1]}>{_RAW_ID})', template)
+            result = re.fullmatch(pattern, line.strip())
+            if not result:
+                return False
+            names.update(result.groupdict())
+            pos += 1
+            return True
+
+        if form == 'fixed':
+            step = entries // 2
+            while step:
+                for name in ('probe', 'row', 'lindex', 'lbits', 'hindex', 'hbits',
+                             'lower', 'equal', 'low_le', 'same', 'take', 'index'):
+                    names.pop(name, None)
+                names['step'] = str(step)
+                if not all(match(line) for line in _RAW_FIXED_STEP):
+                    return None
+                names['previous'] = names['index']
+                step //= 2
+        else:
+            names.update(key_shift=str(32 - hint_shift), chunk=str(hint_shift), mask=str(entries - 1), limitu=f'{1 << hint_shift}u')
+            if not all(match(line) for line in _RAW_HINTED):
+                return None
+        search = pos
+        names.pop('row', None)
+        if not all(match(line) for line in _RAW_TAIL) or pos != len(lines):
+            return None
+        return '\n'.join(lines[:search]), names['index'], form
+
+    found = attempt('fixed')
+    if not found and hint_shift and 0 < hint_shift < 32:
+        found = attempt('hinted')
+    return found
+
+
+def _raw_address(lines, low, high):
+    """Find the inputs of the two plain address copies immediately before a read."""
+    low_alias, high_alias = lines
+    low_alias = re.fullmatch(rf'\s*int {low} = ({_RAW_ID});', low_alias)
+    high_alias = re.fullmatch(rf'\s*int {high} = ({_RAW_ID});', high_alias)
+    if low_alias and high_alias:
+        return low_alias[1], high_alias[1]
+    return None
+
+
+def _raw_quads(msl, helper, table):
+    call = re.compile(rf'^(?P<indent> +)int (?P<out>{_RAW_ID}) = {helper}\('
+                      rf'(?P<lo>{_RAW_ID}), (?P<hi>{_RAW_ID}), \(\*spvDescriptorSet0\.{table}\)\);$')
+    lines = msl.split('\n')
+    assignments = {}
+    changed = set()
+    safe_line = []
+    builtin = re.compile(r'\b(?:as_type<(?:float|int|uint)>|int|uint|float|fma|extract_bits|precise::clamp|spvMulExtended<_\d+, uint>)\(')
+    call_token = re.compile(r'\b\w+\s*(?:<[^;]+>)?\(')
+    for i, line in enumerate(lines):
+        declaration = re.fullmatch(rf'\s*(int|bool|uint|float) ({_RAW_ID}) = ([^;]+);', line)
+        expression = declaration[3] if declaration else line
+        pure = declaration and not call_token.search(builtin.sub('(', expression)) and not re.search(r'(?<![=!<>])' + _OP, expression)
+        safe_line.append(bool(pure or call.fullmatch(line)))
+        if declaration:
+            typ, name, _ = declaration.groups()
+            if name in assignments:
+                changed.add(name)
+            assignments[name] = (i, expression, typ)
+        for write in re.finditer(rf'({_RAW_ID})\s*{_OP}|(?:\+\+|--)\s*({_RAW_ID})|({_RAW_ID})\s*(?:\+\+|--)', expression):
+            changed.add(next(name for name in write.groups() if name))
+        changed.update(re.findall(rf'(?<!\w)&\s*({_RAW_ID})\b', line))
+
+    def expr(name):
+        return assignments.get(name, (-1, '', ''))[1] if name not in changed else ''
+
+    # A 64-bit value in two int words, as the translator spells it: a variable (int) or the bits of one (as_type<int>(_x)), and its unsigned view for the carry
+    value = rf'(?:(?P<{{0}}>{_RAW_ID})|as_type<int>\((?P<{{0}}_bits>{_RAW_ID})\))'
+
+    def word(m, key):   # (spelling, unsigned view, the variable it reads, its type when it must be an int variable) of a matched value
+        if m[key]:
+            return m[key], f'uint({m[key]})', m[key], 'int'
+        return f'as_type<int>({m[key + "_bits"]})', f'as_type<uint>({m[key + "_bits"]})', m[key + '_bits'], None
+
+    def proven(names, typed, line):   # declared int / bool as listed, before line, never reassigned, and only pure lines from the first of them to line
+        entries = [assignments.get(name, (-1, '', '')) for name in names]
+        indices = [entry[0] for entry in entries]
+        return (all(name not in changed for name in names) and min(indices) >= 0 and max(indices) < line
+                and all(entry[2] == typ for entry, typ in zip(entries, typed) if typ)
+                and all(safe_line[min(indices):line]))
+
+    def addresses(low, high, line):
+        """The (low word, high word, byte offset) spellings that give the 64-bit address in (low, high): the pair itself at offset 0, and, when low is
+        a value plus a constant and high that value's high word plus the carry, that value at the constant"""
+        found = []
+        if proven((low, high), ('int', 'int'), line):
+            found.append((low, high, 0))
+        lm = re.fullmatch(value.format('b') + r' \+ (?P<k>\d+)', expr(low))
+        hm = re.fullmatch(value.format('h') + rf' \+ (?P<c>{_RAW_ID})', expr(high))
+        if not lm or not hm:
+            return found
+        b, b_uint, b_var, b_type = word(lm, 'b')
+        h, _, h_var, h_type = word(hm, 'h')
+        carry = re.fullmatch(rf'int\(({_RAW_ID})\)', expr(hm['c']))
+        if not carry or expr(carry[1]) != f'uint({low}) < {b_uint}':
+            return found
+        names, typed = (low, high, hm['c'], carry[1]), ('int', 'int', 'int', 'bool')
+        if proven(names, typed, line) and b_var not in changed and h_var not in changed \
+                and (b_type is None or assignments.get(b_var, (-1, '', ''))[2] == 'int') \
+                and (h_type is None or assignments.get(h_var, (-1, '', ''))[2] == 'int'):
+            found.append((b, h, int(lm['k'])))
+        return found
+
+    edits = []
+    for start in range(2, len(lines) - 9):
+        first = call.fullmatch(lines[start])
+        if not first:
+            continue
+        pair = _raw_address(lines[start - 2:start], first['lo'], first['hi']) or (first['lo'], first['hi'])
+        candidates = addresses(*pair, start)
+        calls = None
+        for base_low, base_high, offset in candidates:
+            run = [first]
+            for i in range(1, 4):
+                pos = start + i * 3
+                next_call = call.fullmatch(lines[pos])
+                if next_call is None or next_call['indent'] != first['indent']:
+                    break
+                pair = _raw_address(lines[pos - 2:pos], next_call['lo'], next_call['hi'])
+                if pair is None or (base_low, base_high, offset + 4 * i) not in addresses(*pair, pos):
+                    break
+                run.append(next_call)
+            if len(run) == 4:
+                calls = run
+                break
+        if calls:
+            edits.append((start, calls))
+    for start, calls in edits:
+        first = calls[0]
+        result = f'{first["out"]}_words'
+        load = f'dm_raw_load4({first["lo"]}, {first["hi"]}, (*spvDescriptorSet0.{table}))'
+        for i, c in enumerate(calls):
+            lines[start + 3 * i] = f'{c["indent"]}int {c["out"]} = {result}.{"xyzw"[i]};'
+        lines[start] = f'{first["indent"]}int4 {result} = {load};\n{lines[start]}'
+    return '\n'.join(lines) if edits else msl
+
+
+def raw_load_quads(msl, table_slot, entries, entry_bytes, hint_shift=None):
+    """Share the raw pool lookup for adjacent, independently resolved 32-bit loads."""
+    if entry_bytes != 32 or entries < 2 or entries & (entries - 1):
+        return msl
+    table = f'cp_s{table_slot}'
+    for scalar in _RAW_FUNCTION.finditer(msl):
+        # The spelling of the table is verified again at the call sites. The
+        # caller supplies its slot from the translator's raw-map reflection.
+        if scalar['table'] != table:
+            continue
+        typ = scalar['type']
+        struct = rf'struct {typ}\s*\{{\s*uint _m0\[1\];\s*\}};'
+        member = rf'(?m)^\s*device {typ}\* {table} \[\[id\(\d+\)\]\];'
+        if not re.search(struct, msl) or not re.search(member, msl):
+            continue
+        stride = entry_bytes // 4
+        search = _raw_search(scalar['body'], scalar['lo'], scalar['hi'], table, entries, stride, hint_shift)
+        if not search:
+            continue
+        following = msl[scalar.end():]
+        output = _raw_quads(following, scalar['name'], table)
+        if output == following:
+            continue
+        prefix, index, form = search
+        return msl[:scalar.end()] + _raw_quad_helper(scalar, prefix, index, stride, entries, form, hint_shift) + output
+    return msl
+
+
+def _raw_quad_helper(scalar, search, index, stride, entries, form, hint_shift):
+    table, typ, name, low, high = (scalar[k] for k in ('table', 'type', 'name', 'lo', 'hi'))
+    if form == 'fixed':
+        has_next, one_chunk = f'index < {entries - 1}u', 'true'
+    else:
+        # The hinted table holds as many entries as entry 0's delta (low word) says, unused ones starting at ~0. A hint names the entry holding its
+        # whole chunk, which is the search's answer for every word only within that chunk: a span crossing one takes the scalar path.
+        has_next, one_chunk = 'index + 1u < table._m0[4]', f'(address >> {hint_shift}) == ((address + 15ul) >> {hint_shift})'
+    return f'''
+
+static inline __attribute__((always_inline))
+int dm_raw_find(int {low}, int {high}, device {typ}& {table})
+{{
+{search}
+    return {index};
+}}
+
+static inline __attribute__((always_inline))
+ulong dm_raw_word_pair(device {typ}& table, uint word)
+{{
+    return as_type<ulong>(uint2(table._m0[word], table._m0[word + 1u]));
+}}
+
+static inline __attribute__((always_inline))
+int dm_raw_load_word(ulong address, device {typ}& table)
+{{
+    uint2 words = as_type<uint2>(address);
+    int low = as_type<int>(words.x);
+    int high = as_type<int>(words.y);
+    return {name}(low, high, table);
+}}
+
+static inline __attribute__((always_inline))
+int4 dm_raw_load4(int low, int high, device {typ}& table)
+{{
+    const ulong limit = ~0ul - 15ul;
+    const ulong address = as_type<ulong>(uint2(as_type<uint>(low), as_type<uint>(high)));
+    if (!(address & 3ul) && address <= limit && {one_chunk}) {{
+        const uint index = uint(dm_raw_find(low, high, table));
+        const uint word = {stride}u * index;
+        const ulong end = dm_raw_word_pair(table, word + 2u);
+        // The scalar search prefers the nearest preceding start, even in an overlap.
+        const ulong next = {has_next} ? dm_raw_word_pair(table, word + {stride}u) : ~0ul;
+        if (end >= address && end - address >= 16ul && next > address + 15ul) {{
+            const ulong gpu_address = address + dm_raw_word_pair(table, word + 4u);
+            if (!(gpu_address & 3ul) && gpu_address <= limit) {{
+                const device uint* data = reinterpret_cast<const device uint*>(gpu_address);
+                const int x = as_type<int>(data[0]);
+                const int y = as_type<int>(data[1]);
+                const int z = as_type<int>(data[2]);
+                const int w = as_type<int>(data[3]);
+                return int4(x, y, z, w);
+            }}
+        }}
+    }}
+    const int x = dm_raw_load_word(address, table);
+    const int y = dm_raw_load_word(address + 4ul, table);
+    const int z = dm_raw_load_word(address + 8ul, table);
+    const int w = dm_raw_load_word(address + 12ul, table);
+    return int4(x, y, z, w);
+}}
+'''
