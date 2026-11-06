@@ -357,6 +357,7 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // they keep their old bytes, so the call returns 0 and alias_initialize zeroes them when they are mapped again
 // nvn_mtl.m defines it; this weak empty one serves the host tests that link no graphics (the linker takes nvn_mtl.m's where both are present)
 __attribute__((weak)) void mtl_guest_released(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; }
+int dm_guest_in_files(void) { return g_gf_n != 0; }   // nvn_dirty_discard: an anonymous mapping over the files' range would undo them
 static int guest_release(uintptr_t lo, uintptr_t hi) {
     mtl_guest_released(lo, hi);   // invalidate freed pools before their guest pages are reused
     if (g_gf_n) {
