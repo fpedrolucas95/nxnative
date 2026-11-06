@@ -256,11 +256,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand addr = context.IAdd(ALocalAddress(context, x, 32, stride: false), Const((int)x.SignedField(40, 64)));
-            Operand lane = ALaneId(context);
-            Operand g = context.ShiftRightU32(lane, Const(2));
-            Operand t = context.BitwiseAnd(lane, Const(3));
             int id = context.ResourceManager.SharedMemoryId;
-            Operand[] results = new Operand[count];
+            bool compute = context.TranslatorContext.Definitions.Stage == ShaderStage.Compute;
+            Operand lane = compute ? null : ALaneId(context);
+            Operand g = compute ? null : context.ShiftRightU32(lane, Const(2));
+            Operand t = compute ? null : context.BitwiseAnd(lane, Const(3));
 
             // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, with no BAR between (the agl networks of Ocarina of Time's movie
             // filter); the warp's shared memory accesses are in order on the Switch, while Metal orders another lane's threadgroup store and this load only through
@@ -268,37 +268,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // runs it), so a subgroup barrier before its loads and one after (no lane's next store over the rows before all have read them) is safe
             context.SubgroupBarrier();
 
-            for (int m = 0; m < count; m++)
-            {
-                if (mode == 0)
-                {
-                    Operand rowAddr = context.Shuffle(addr, context.IAdd(g, Const(8 * m)));
-                    Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(t, Const(2)));
-                    results[m] = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
-                }
-                else
-                {
-                    Operand[] h = new Operand[2];
-
-                    for (int j = 0; j < 2; j++)
-                    {
-                        Operand row = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
-                        Operand rowAddr = context.Shuffle(addr, context.IAdd(row, Const(8 * m)));
-                        Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(g, Const(1)));
-                        Operand word = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
-                        h[j] = context.BitfieldExtractU32(word, context.ShiftLeft(context.BitwiseAnd(byteOffset, Const(2)), Const(3)), Const(16));
-                    }
-
-                    results[m] = context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
-                }
-            }
-
-            context.SubgroupBarrier();
-
             for (int m = 0; m < count && x.Rd + m < RegisterConsts.RegisterZeroIndex; m++)
             {
-                context.Copy(Register(x.Rd + m, RegisterType.Gpr), results[m]);
+                Operand result = compute ? context.Add(Instruction.MatrixLoad, Local(), Const(id), Const(mode), addr, Const(m)) : LdsmLane(context, g, t, addr, id, m, mode);
+
+                context.Copy(Register(x.Rd + m, RegisterType.Gpr), result);
             }
+
+            context.SubgroupBarrier();   // no lane's next store over the rows before every lane has read them
+        }
+
+        // LDSM per lane: lane L's register of matrix m (g = L / 4, t = L % 4), from the row addresses (bytes in shared memory `id`) the lanes hold in addr
+        public static Operand LdsmLane(EmitterContext context, Operand g, Operand t, Operand addr, int id, int m, int mode)
+        {
+            if (mode == 0)
+            {
+                Operand rowAddr = context.Shuffle(addr, context.IAdd(g, Const(8 * m)));
+                Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(t, Const(2)));
+
+                return context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+            }
+
+            Operand[] h = new Operand[2];
+
+            for (int j = 0; j < 2; j++)
+            {
+                Operand row = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
+                Operand rowAddr = context.Shuffle(addr, context.IAdd(row, Const(8 * m)));
+                Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(g, Const(1)));
+                Operand word = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+                h[j] = context.BitfieldExtractU32(word, context.ShiftLeft(context.BitwiseAnd(byteOffset, Const(2)), Const(3)), Const(16));
+            }
+
+            return context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
         }
 
         // MOVM.16.MT88 Rd, Ra: the 8 x 8 matrix of halves the warp holds (lane L: row L / 4, columns 2 (L % 4), + 1), transposed into the same layout
