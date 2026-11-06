@@ -4,8 +4,8 @@ What it takes to play the Switch 2 Ocarina of Time (0400486024DEC000) on the Mac
 
 ## What you need
 
-- **Your own dump of the game:** The Legend of Zelda: Ocarina of Time (Switch 2, title ID `0400486024DEC000`), base game plus update v131072, as one `.nup` file or the same files unpacked into a folder (`base/exefs`, `base/romfs`, `updates/131072/...`; [Switch 2 games](../../../README.md#switch-2-games)). No `prod.keys`: Switch 2 games are built from the NUP container or its files, and neither needs keys. Nothing from the game is in this repository or in these pull requests.
-- **A Mac with Apple silicon** and the project's toolchain: macOS 26.6 or later, Xcode 27.2 (its Metal compiler builds the shaders), Homebrew and an arm64 Python 3.12 or newer ([README](../../../README.md)). Tested on an M5 Pro with 24 GB.
+- **Your own dump of the game:** The Legend of Zelda: Ocarina of Time (Switch 2, title ID `0400486024DEC000`), base game plus update v131072, as one `.nup` file or the same files unpacked into a folder (`base/exefs`, `base/romfs`, `updates/131072/...`; [Switch 2 games](../../README.md#switch-2-games)). No `prod.keys`: Switch 2 games are built from the NUP container or its files, and neither needs keys. Nothing from the game is in this repository or in these pull requests.
+- **A Mac with Apple silicon** and the project's toolchain: macOS 26.6 or later, Xcode 27.2 (its Metal compiler builds the shaders), Homebrew and an arm64 Python 3.12 or newer ([README](../../README.md)). Tested on an M5 Pro with 24 GB.
 - **Memory:** the game's footprint is about 10.4-10.8 GB in gameplay (peaks ~11.1 GB), with up to ~10.5 GB of GPU allocation; 6-7 GB of it is wired at gameplay entry. **A 24 GB Mac is tight**: close other large apps and builds; the margin above memory-pressure level 2 was 0.3-0.7 GB and depended on what else ran. 32 GB or more is comfortable. The iPhone and iPad are not covered here.
 
 ## Pull requests it needs first
@@ -42,7 +42,7 @@ DMSH_RAW_LOAD_QUADS=1 DMSH_RAW_FAST_LOOKUP=1 DM_GAME=0400486024DEC000 python3 dm
 make -C dm/host GAME=0400486024DEC000 dmhost
 ```
 
-The steps by hand (rewriter, shader split, shader build, host) are in [Build by hand (Mac)](../../../docs/development.md#build-by-hand-mac). The full shader build is ~42,850 shaders and took ~40 minutes on the M5 Pro.
+The steps by hand (rewriter, shader split, shader build, host) are in [Build by hand (Mac)](../development.md#build-by-hand-mac). The full shader build is ~42,850 shaders and took ~40 minutes on the M5 Pro.
 
 ## Settings
 
