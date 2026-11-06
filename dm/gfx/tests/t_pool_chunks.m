@@ -105,6 +105,51 @@ int main(void) { @autoreleasepool {
     CHECK("the entire hinted chunk lies within its pool range", range[0] <= chunk << DMSH_GMEM_HINT_SHIFT && range[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
     CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
+    // A texture a shader read is made, and goes into the table in place: no new table, and the budget does not apply. One nobody read stays the dummy, as does a render target no pass has written
+    {
+        tex_t rd = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99801}, un = rd, rt = rd;
+        rd.d = (nvn_texdesc){.target = 1, .format = NVN_FORMAT_RGBA8, .width = 2048, .height = 2048, .depth = 1, .levels = 1, .samples = 1}; nvn_tex_layout(&rd.d, &rd.L);
+        rd.pool = &pool; rd.mem = mem + 100 * MB; rd.off = 100 * MB;
+        un = rd; un.serial = 99802; un.mem = mem + 110 * MB; un.off = 110 * MB;
+        rt = rd; rt.serial = 99803; rt.mem = mem + 120 * MB; rt.off = 120 * MB; rt.d.flags = NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+        mtl_reg_tex(301, &rd, NULL); mtl_reg_tex(302, &un, NULL); mtl_reg_tex(303, &rt, NULL);
+        // Past the budget, so the walk makes none of them
+        id<MTLBuffer> hog = [g_dev newBufferWithLength:pool_budget() + (1u << 20) options:MTLResourceStorageModePrivate]; CHECK("over the budget", hog && pool_budget_full());
+        __unsafe_unretained id<MTLBuffer> tb = nil, tb2 = nil;
+        mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
+        pool_gpu(0, MTLTextureType2D, 0, 0, &tb);
+        const uint64_t *e = (const uint64_t *)((const uint8_t *)tb.contents + DMSH_POOL_HEAD); uint64_t dummy = e[302];
+        CHECK("the table's head holds the bitmap's address", *(const uint64_t *)((const uint8_t *)tb.contents + 8) == g_seen_buf.gpuAddress);
+        CHECK("unread textures read the dummy", e[301] == dummy && e[303] == dummy);
+        os_unfair_lock_unlock(&g_rmu); finish();
+        ((uint32_t *)g_seen_buf.contents)[301 / 32] |= 1u << (301 % 32) | 1u << (303 % 32);
+        mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
+        pool_gpu(0, MTLTextureType2D, 0, 0, &tb2);
+        const uint64_t *e2 = (const uint64_t *)((const uint8_t *)tb2.contents + DMSH_POOL_HEAD);
+        CHECK("a read texture goes in, past the budget", e2[301] != dummy);
+        CHECK("and into the table a draw already encoded reads", e[301] != dummy);
+        CHECK("an unread one stays the dummy", e2[302] == dummy);
+        CHECK("a read render target no pass wrote stays the dummy", e2[303] == dummy);
+        os_unfair_lock_unlock(&g_rmu); finish();
+        mtl_reg_tex(301, &un, NULL); CHECK("an ID given another texture has not been read", !pool_seen(301));
+        mtl_reg_tex(301, NULL, NULL); mtl_reg_tex(302, NULL, NULL); mtl_reg_tex(303, NULL, NULL); mtl_tex_release(&rd); mtl_tex_release(&un); mtl_drain(); hog = nil;
+    }
+    // The write log: one bit an entry, and the host learns the range of the entry the bit names, from the table the shader used
+    {
+        id<MTLBuffer> map = gmem_map();
+        mtl_sub_begin(); uint64_t log = gml_take(map); CHECK("a log", log != 0);
+        id<MTLBuffer> lb = g_gml_free.lastObject; (void)lb;
+        const uint8_t *t = (const uint8_t *)map.contents; int n0 = g_gml_n, want = -1;
+        for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
+        CHECK("the pool has an entry to log", want > 0);
+        id<MTLBuffer> w = [g_dev newBufferWithLength:gml_bytes(map) options:MTLResourceStorageModeShared];
+        ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
+        gml_read(w, map, 0, 0);
+        CHECK("the bit teaches its range", g_gml_n == n0 + 1 && g_gml_lo[n0] <= base + 900 * MB && base + 900 * MB < g_gml_hi[n0]);
+        gml_read(w, map, 0, 0);
+        CHECK("a known range adds nothing", g_gml_n == n0 + 1);
+        finish();
+    }
     // A smaller pool is one buffer, and the removal of the large one takes all its entries
     uint8_t *small = mmap(NULL, 64 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (small == MAP_FAILED) abort();
     int n3 = g_npool; mtl_pool_add(small, 64 * MB); CHECK("one entry", g_npool == n3 + 1 && g_nbig == 1);

@@ -794,7 +794,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: a global memory access whose address the search traced to no storage buffer, an address the shader loaded from memory (Donkey Kong Bananza: gsys's vertex
         // shader that resets the terrain's indirect draw records reads each record's address from a storage buffer). Ryujinx drops such an access (a load reads 0). Here it
-        // goes to the address itself: a branchless binary search finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
+        // goes to the address itself: a tagged hint for its 2 MiB chunk, else a branchless binary search, finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
         // guest address) and is accessed through a physical storage buffer pointer. An address in no pool is still dropped
         private static bool TryGenerateRawStorageOp(
             GtsContext gtsContext,
@@ -901,7 +901,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             {
                 Operand word = context.ShiftRightU32(selected, Const(5));
                 Operand bit = context.ShiftLeft(Const(1), context.BitwiseAnd(selected, Const(31)));
+                Operand lblLogged = Label();
+
+                // Read first (upstream main): a bit is set once, so nearly every store of a shader that writes a whole frame costs a load, not an atomic
+                context.BranchIfTrue(lblLogged, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.StorageBuffer, logBinding, Const(0), word), bit), Const(0)));
                 context.AtomicOr(StorageKind.StorageBuffer, logBinding, Const(0), word, bit);
+                context.MarkLabel(lblLogged);
             }
 
             // A small integer is read or written in its 32-bit word

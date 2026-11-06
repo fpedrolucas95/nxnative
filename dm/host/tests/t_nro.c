@@ -4,6 +4,7 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
@@ -14,7 +15,6 @@ static uint64_t missing;
 uint64_t resolve_import(module_t *m, const char *name) { (void)m; (void)name; return (uint64_t)&missing; }
 int hle_implements(const char *name) { (void)name; return 0; }
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
-void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }
 
 typedef struct {
     Elf64_Sym sym[4];
