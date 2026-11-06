@@ -77,6 +77,7 @@ Start a new game to reproduce the opening scene transition. With the test save a
 For a run past the opening, copy the committed save folder to the new run's `DM_SAVE` and load slot 00 from the menu. The checkpoint contains both `slot_00/progress.sav` and `slot_00/caption.sav`. The load screen identifies it as **Kokiri Forest Autosave**. A windowed reload reached the playable scene with the HUD and controls, so rendering can be tested without replaying the movie.
 
 ## Found on this game
+- [The guard counted pool buffers outside the residency set](../../../docs/reference/memory.md#the-guard-counted-pool-buffers-outside-the-residency-set): leaving Link's house the game stopped at 11.3 GB counted with 4.3 GB in the residency set; resolved.
 
 - The online library's [eventfd for its poller](../../../docs/reference/services.md#eventfds-served-offline) and the [virtual audio input list](../../../docs/reference/audio.md#no-virtual-audio-input-devices-sdk-22) blocked startup.
 - The SDK's [NDVE pack](../../../docs/reference/shaders.md#the-movie-librarys-ndve-shader-pack) contains 22 compute programs. The title route uses 11.

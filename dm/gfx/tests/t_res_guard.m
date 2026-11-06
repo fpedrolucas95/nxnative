@@ -120,12 +120,26 @@ static void stuck(void) {
     pthread_mutex_unlock(&g_res_mu);
 }
 
+// A pool buffer outside the residency set is the guest's own memory: the device counts it, the guard does not (g_pool_out), until it joins the set
+static void pool_wrappers(void) {
+    enum { LEN = 64 << 20 };
+    uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    int64_t out0 = atomic_load(&g_pool_out); uint64_t dev0 = (uint64_t)g_dev.currentAllocatedSize;
+    mtl_pool_add(mem, LEN);
+    CHECK(atomic_load(&g_pool_out) == out0 + LEN, "a new pool buffer is counted as outside the residency set");
+    CHECK((uint64_t)g_dev.currentAllocatedSize >= dev0 + LEN && guard_used() + LEN / 2 < (uint64_t)g_dev.currentAllocatedSize, "the device counts it, the guard leaves it out");
+    void *b; uint64_t o; CHECK(mtl_addr((uint64_t)(uintptr_t)mem + 100, 16, &b, &o), "an address in it is looked up");
+    CHECK(atomic_load(&g_pool_out) == out0, "made resident, it is no longer left out");
+    mtl_pool_del(mem); mtl_drain();
+    CHECK(atomic_load(&g_pool_out) == out0, "and its removal leaves the count as it was");
+    munmap(mem, LEN);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     (void)argv; signal(SIGTERM, on_term);
     setenv("DM_NVN_RES_LIMIT_MB", "0", 1);   // this test sets the levels itself
     mtl_init();
     if (argc > 1) stuck();
-    else { levels(); commits(); eviction(); idle_pool_buffers(); stop(); }
+    else { levels(); commits(); eviction(); idle_pool_buffers(); pool_wrappers(); stop(); }
     printf("t_res_guard: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

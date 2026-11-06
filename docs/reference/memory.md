@@ -448,6 +448,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `t_res_guard`. In a game, a low `DM_NVN_RES_LIMIT_MB` ends the run with the report and exit code 0.
 - **Note:** the working set counts pools too, shared buffers over guest memory that add no bytes: a game's numbers look larger than its footprint. A 16 GB Mac has less margin: the report shows what filled it.
 
+### The guard counted pool buffers outside the residency set
+
+- **Symptom:** the game stops with `[RED] GPU memory guard: … stopping the game before the driver cannot wire more` while the same line gives a residency set of a third of that (Ocarina of Time on a 16 GB Mac: `GPU allocated 11300 MB`, `residency set 4336 MB`), as the player leaves Link's house for Kokiri Forest; the player's dialog says the game reached 11,300 or 12,076 MB of 12,124 MB.
+- **Cause:** the guard took the larger of the set's size and the device's `currentAllocatedSize`, and the device counts every zero-copy buffer over guest memory at its full length, resident or not. A pool buffer outside the residency set is the game's own memory, which the process holds anyway, and the driver wires none of it until it joins the set. Ocarina of Time kept 4,587 pool buffers over 8.8 GB, 2 GB of them resident: 6.8 GB of the 11.3 GB counted was guest memory nothing had wired.
+- **Fix:** the host counts the bytes of kept pool buffers that are not in the residency set (`g_pool_out`, `pool_out_add` wherever a pool buffer is kept, made resident or dropped) and the guard takes them out of the device's count (`guard_used`, `nvn_mtl.m`). DM_CTL `poolstat` prints the device's count, the guard's and the bytes left out.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) (v131072, MacBook Air M4 16 GB): after the fix the guard counted 4.8–6.2 GB in Kokiri Forest and through the talk with Saria, where it had stopped at 11.3 GB; the process footprint was 9.5–10.2 GB and swap grew to 2.4 GB on that Mac.
+- **Check:** `t_res_guard` (`pool_wrappers`: a new pool buffer is left out of the guard's count until it is resident, and its removal restores the count).
+
 ### A game that stops submitting piles up retired pool buffers
 
 - **Symptom:** out of focus, with the picture still and the sound on, GPU allocated climbs at hundreds of MB a second with the residency set flat and swap following; back in focus the game stays frozen with no GPU error. The `memory up to frame` lines show a sawtooth of GPU allocated, 10 to 30 GB, with the set flat.

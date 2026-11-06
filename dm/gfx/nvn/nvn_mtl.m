@@ -355,7 +355,16 @@ enum { GUARD_OK, GUARD_EVICT, GUARD_STOP, GUARD_WALL, GUARD_EVERY = 30, GUARD_TI
 static struct { uint64_t evict, stop, wall; } g_guard;   // bytes, all 0 with the guard off: the eviction level, the stop level, the size no commit grows past
 static _Atomic int g_guard_lv;   // the highest level met since the submit thread last looked (guard_act)
 static int guard_level(uint64_t used) { return !g_guard.stop ? GUARD_OK : used >= g_guard.wall ? GUARD_WALL : used >= g_guard.stop ? GUARD_STOP : used >= g_guard.evict ? GUARD_EVICT : GUARD_OK; }
-static uint64_t guard_used(void) { return MAX(atomic_load_explicit(&g_guard_set, memory_order_relaxed), (uint64_t)g_dev.currentAllocatedSize); }
+// The device's count (currentAllocatedSize) holds every zero-copy buffer over guest memory at its full length, resident or not. A pool buffer outside the residency set is the game's own
+// memory, which the process holds anyway, and the GPU wires none of it until it joins the set: Ocarina of Time keeps 4,587 such wrappers over 8.8 GB of its pools with 2 GB of them
+// resident, and the count passed the 11,300 MB stop as the player left Link's house while the residency set held 4.3 GB. So those bytes (g_pool_out) are taken out of the count
+static _Atomic int64_t g_pool_out;   // bytes of kept pool buffers not in the residency set (pool_out_add)
+static void pool_out_add(id<MTLBuffer> b, int64_t sign) { if (b) atomic_fetch_add_explicit(&g_pool_out, sign * (int64_t)b.length, memory_order_relaxed); }
+static uint64_t guard_used(void) {
+    uint64_t dev = (uint64_t)g_dev.currentAllocatedSize; int64_t out = atomic_load_explicit(&g_pool_out, memory_order_relaxed);
+    if (out > 0) dev = dev > (uint64_t)out ? dev - (uint64_t)out : 0;
+    return MAX(atomic_load_explicit(&g_guard_set, memory_order_relaxed), dev);
+}
 static void guard_raise(int lv) { int cur = atomic_load(&g_guard_lv); while (lv > cur && !atomic_compare_exchange_weak(&g_guard_lv, &cur, lv)) {} }
 static void guard_act(uint64_t fence);
 static void idle_evict_periodic(void);   // defined with the guard's evictions: idle sharing / packaged textures go every 512 fences, not only under guard pressure
@@ -770,7 +779,7 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
 static void pool_res(int i) {
     if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++; pool_out_add(g_pools[i].buf, -1);
 }
 // A large pool in chunks. Metal wires a zero-copy buffer whole while it is in the residency set, so one buffer over a large pool pins all of it, whatever the GPU reads. Mario Kart World's 2,427 MB
 // graphics pool: the GPU has touched 1,111 MB by the first race, 326 MB of it in the last 1,500 frames; on a 16 GB Mac the driver then spent half its time wiring and unwiring (3.2 s of a 6 s Metal System
@@ -852,7 +861,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
     g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0, hi, 1};   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
-    [g_keep addObject:buf];
+    [g_keep addObject:buf]; pool_out_add(buf, 1);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -879,7 +888,7 @@ void mtl_pool_del(const void *mem) {
         if (g_pools[i].key == mem) {
             if (g_pools[i].lo < drop_lo) drop_lo = g_pools[i].lo;
             if (g_pools[i].hi > drop_hi) drop_hi = g_pools[i].hi;
-            id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_at(b, 0, g_fence + sub_open()); if (g_pools[i].res) g_pool_res_n--;   // no submission open: none can reach it now that it left the table (defer_idle)
+            id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; if (!g_pools[i].res) pool_out_add(b, -1); defer_obj_at(b, 0, g_fence + sub_open()); if (g_pools[i].res) g_pool_res_n--;   // no submission open: none can reach it now that it left the table (defer_idle)
             if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
             [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
             if (i < g_npool) big_moved(i);   // the entry moved into this place
@@ -922,7 +931,7 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
     g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
     g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, end > b->hi ? b->hi : end, unk};
-    [g_keep addObject:buf];
+    [g_keep addObject:buf]; pool_out_add(buf, 1);
     return g_npool - 1;
 }
 // Once raw-address shaders need a whole-pool mapping, chunks and their older
@@ -935,7 +944,7 @@ static void big_full(big_pool *b) {   // caller holds g_mu
     for (int i = 0; i < g_npool;) {
         pool_ent *p = &g_pools[i];
         if (p->key != b->mem || i == b->full - 1) { i++; continue; }
-        [g_keep removeObject:p->buf]; defer_obj_release(p->buf);
+        [g_keep removeObject:p->buf]; if (!p->res) pool_out_add(p->buf, -1); defer_obj_release(p->buf);
         if (p->res) g_pool_res_n--;
         g_pools[i] = g_pools[--g_npool];
         if (i < g_npool) big_moved(i);
@@ -965,7 +974,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     // pool went: PRAGMATA's pools kept a 48 MB and a 96 MB chunk at one base, each counted whole, and the set passed Metal's working set on an 8 GB Mac. Nothing keeps its GPU address past
     // that: every cache of pool addresses is checked against g_pool_gen, which big_new bumped
     if (i >= 0) {
-        [g_keep removeObject:g_pools[i].buf]; defer_obj_release(g_pools[i].buf); g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
+        [g_keep removeObject:g_pools[i].buf]; if (!g_pools[i].res) pool_out_add(g_pools[i].buf, -1); defer_obj_release(g_pools[i].buf); g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
         g_pools[i] = g_pools[n]; g_npool--; n = i;
     }
     b->chunk[k] = n + 1;
@@ -9890,7 +9899,7 @@ static id<MTLBuffer> gmem_map(void) {
         if (!bm_overlaps(bm, nbm, p->lo, p->hi)) { skipped++; skipped_mb += (p->hi - p->lo) >> 20; continue; }   // no buffer address taken in it: no entry, not resident for the table
         // DM_NVN_GMEM_RES=0 (diagnostic): the table lists every pool but makes none resident; a pool comes into the residency set when a binding addresses it (pool_res).
         // How many MB only the table made resident is logged once: PRAGMATA's 190 such shaders kept all of its ~4 GB of pools wired on an 8 GB Mac
-        if (!p->res && gres) { res_add(p->buf); p->res = 1; g_pool_res_n++; g_gmem_only_mb += (p->end - p->base) >> 20; }
+        if (!p->res && gres) { res_add(p->buf); p->res = 1; g_pool_res_n++; pool_out_add(p->buf, -1); g_gmem_only_mb += (p->end - p->base) >> 20; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == GMEM_MAP_MAX) { if (!over++) over_lo = lo; over_bytes += hi - lo; continue; }
@@ -14747,6 +14756,15 @@ void dm_gfx_poolstat(void) {
          (unsigned long long)res_n, res_b / M, tex_b / M, (unsigned long long)m, (unsigned long long)n90, b90 / M, b50 / M, (unsigned long long)n0, b0 / M);
     for (int q = 0; q < TOP && top[q].len; q++) MLOG("[poolstat]   %#lx: %.0f MB, texture storage %.0f MB (%.0f%%)", (unsigned long)top[q].lo, top[q].len / M, top[q].texb / M, 100.0 * top[q].texb / top[q].len);
     free(tx);
+    // What else the device counts as allocated (currentAllocatedSize), resident or not: every pool buffer the host keeps (g_keep: zero-copy wrappers of guest memory, each counted
+    // at its length), the large pools' cached upload sources (g_up_big_src), the constant buffer banks
+    uint64_t keep_n = 0, keep_b = 0, ubs_n = 0, ubs_b = 0;
+    pthread_mutex_lock(&g_mu);
+    for (id<MTLBuffer> b in g_keep) { keep_n++; keep_b += b.allocatedSize; }
+    for (NSValue *k in g_up_big_src) { id<MTLBuffer> b = g_up_big_src[k]; ubs_n++; ubs_b += b.allocatedSize; }
+    pthread_mutex_unlock(&g_mu);
+    MLOG("[poolstat] device allocated %.0f MB (guard counts %.0f MB; %.0f MB of pool buffers outside the residency set left out): pool buffers kept %llu, %.0f MB; cached upload sources %llu, %.0f MB; constant buffer banks %.0f MB (%llu c1)",
+         g_dev.currentAllocatedSize / M, guard_used() / M, atomic_load(&g_pool_out) / M, (unsigned long long)keep_n, keep_b / M, (unsigned long long)ubs_n, ubs_b / M, g_c1_alloc_bytes / M, (unsigned long long)g_c1_count);
 }
 // The Mac's DM_CTL "texstat" (hle_hid.c): the host textures by kind and, for those made from guest memory (NvPkg: they can be made again from it), by the frames since their last use
 static double ps_span(const uint64_t *a, int n) { uint64_t lo = ~0ull, hi = 0; for (int i = 0; i < n; i++) if (a[i]) { lo = MIN(lo, a[i]); hi = MAX(hi, a[i]); } return hi >= lo && hi ? (double)(hi - lo) : 0; }   // address span of a group's storage starts
