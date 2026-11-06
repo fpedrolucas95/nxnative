@@ -47,7 +47,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     CHECK(entry(t1, 1) && entry(t1, 1) == g_treg[1].view_rid && entry(t1, 3) == g_treg[3].view_rid, "2D IDs hold their textures");
     uint64_t dummy = entry(t1, *(const uint32_t *)t1.contents);
     CHECK(entry(t1, 2) == dummy, "the 3D ID holds the dummy");
-    CHECK(g_treg[2].tt == MTLTextureType3D + 1 && g_treg[1].tt == MTLTextureType2D + 1, "each registration's type is known after its first lookup");
+    CHECK(g_treg[1].tt == MTLTextureType2D + 1, "a looked-up registration's type is known after its first lookup");
+    CHECK(g_treg[2].tt == 0 && !g_treg[2].view, "the 3D ID is turned away by its descriptor (ttype_apart) without a lookup");
     treg_drop_views(&g_treg[2]);   // as the submission end does for a retired registration
     os_unfair_lock_unlock(&g_rmu);
 
@@ -56,7 +57,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     uint64_t skip0 = g_stat_pool_tt_skip;
     id<MTLBuffer> t2 = table();
     CHECK(t2 && t2 != t1, "a rebuild while the replaced table may still be read writes another buffer");
-    CHECK(g_stat_pool_tt_skip > skip0 && !g_treg[2].view, "the 3D ID is passed over without its view being made again");
+    CHECK(g_stat_pool_tt_skip == skip0 && !g_treg[2].view, "the 3D ID is passed over without its view being made again (by its descriptor, before the type cache)");
     CHECK(entry(t2, 2) == dummy && entry(t2, 4) == g_treg[4].view_rid, "the rebuilt table holds the dummy for it and the new ID's texture");
     os_unfair_lock_unlock(&g_rmu);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission that could read the first table completes");

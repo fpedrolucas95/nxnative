@@ -46,7 +46,7 @@ class DepthSignal(unittest.TestCase):
 
 
 class HeapSignals(unittest.TestCase):
-    """The heap check's keys must give the heap region the whole request with the alias region the profile keeps (hle_svc.c: alias at +256 MB, then stacks, then the heap)"""
+    """The heap check's keys must give the heap region the whole request with the alias region the profile keeps (hle_svc.c mem_init: the heap region is mem_reserve less 256 MB, mem_stack and mem_alias)"""
     STACK = 0x10000000
 
     def profile(self, **keys):
