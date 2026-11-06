@@ -170,6 +170,7 @@ static void t_vibration(void) {
     CHECK(!memcmp(&got, &v, sizeof v) && vibration[1].motor[0].amplitude_low == 0, "game value is retained for the addressed player only");
     h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "right motor is a right LRA");
     CHECK(h_hid_VibMounted(&h[0]) && h_hid_VibMounted(&h[1]), "both motors of a routed controller are mounted");
+    CHECK(!h_hid_VibOunce(&h[0]) && !h_hid_VibOunce(&h[1]), "a mounted motor is a Switch 1 actuator, not a Switch 2 one");
     uint32_t invalid[] = {0, 0x20003, 0x1000003, 0x203};
     int mounted = 0;
     for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++) mounted |= h_hid_VibMounted(&invalid[i]);

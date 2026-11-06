@@ -906,6 +906,14 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
     return h && vib_targets(*h);
 }
+// Whether a handle's device is a Switch 2 controller's actuator (SDK 22; the same shape as IsVibrationDeviceMounted, its detail call reaches the hid service, sdk+0x6cd5f0 in SDK 22.2.8;
+// The Legend of Zelda: Ocarina of Time imports it): no, as GetVibrationDeviceInfo reports every device as a Switch 1 linear resonant actuator
+HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: no Switch 2 actuator (the host's are Switch 1 ones)", unsigned, h_hid_VibOunce, const uint32_t *h) {
+    (void)h; return 0;
+}
+// SDK 22's sensor fusion ends with DisableNpadImu (sdk+0x6d6880 in SDK 22.2.8), through the hid service; Ocarina of Time calls it when its input system ends (main+0x3469314). The host
+// keeps no IMU state to disable
+HLE_FORCE("_ZN2nn3hid20FinalizeSensorFusionEv", "sensor fusion finalize; nothing to disable on the host", void, h_hid_FusionFin, void) {}
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
     uint32_t targets = h ? vib_targets(*h) : 0;
     *v = targets ? dm_haptics_actual(__builtin_ctz(targets), *h >> 16 & 1) : (dm_vibration){0, 160, 0, 320};
