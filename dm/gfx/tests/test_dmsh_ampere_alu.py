@@ -87,6 +87,28 @@ class MufuTurns(Alu):
     def test_tanh_is_translated(self):
         msl = self.kept(self.TANH, srcs=(19,))
         self.assertIn('exp2(', msl)
+class DirectedRounding(Alu):
+    """I2F (32-bit source, 32-bit float) and F2F.F16.F32 with .RM / .RP / .RZ (78..79): the result rounded to nearest is compared with the exact value and stepped to
+    its neighbour. The compiler's 32-bit division starts with I2F.U32.RP; rounded to nearest, a value above 2^24 came out one ulp off in about half the cases (a GPU
+    cross-check against an exact reference: 45 mismatches in 300 I2F, none with the fix). Encodings built from the sm_86 oracle corpus and checked with nvdisasm"""
+    I2F_RP = (0x000fe20000209000, 0x0000001300067306)     # I2F.U32.RP R6, R19
+    I2F_RN = (0x000fe20000201000, 0x0000001300067306)     # I2F.U32 R6, R19
+    F2F_RP = (0x000fe20000208800, 0x0000001300067304)     # F2F.F16.F32.RP R6, R19
+    F2F_RN = (0x000fe20000200800, 0x0000001300067304)     # F2F.F16.F32 R6, R19
+
+    def test_i2f_rp_checks_against_the_integer(self):
+        msl = self.kept(self.I2F_RP, srcs=(19,))
+        self.assertIn('4294967296', msl)                     # the bound above which the rounded float is above every u32
+        self.assertRegex(msl, r'as_type<int>\(_\d+\) \+ 1\b')   # the float's bits stepped up
+
+    def test_i2f_to_nearest_is_plain(self):
+        self.assertNotIn('4294967296', self.kept(self.I2F_RN, srcs=(19,)))
+
+    def test_f2f_rp_reads_the_half_back(self):   # through a mask: an unpack of the pack would be folded into the float itself (PropagatePack)
+        self.assertIn('& 65535', self.kept(self.F2F_RP, srcs=(19,)))
+
+    def test_f2f_to_nearest_is_plain(self):
+        self.assertNotIn('& 65535', self.kept(self.F2F_RN, srcs=(19,)))
 
 
 class CompareFtz(Alu):
