@@ -194,6 +194,12 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** keep a submission-local reference to finalized textures resolved during encoding. The ghost ring stays bounded, and eviction does not drop the texture's active lookup or residency. At commit, overflow backing retires behind the GPU fence. Bindless tables containing transient views are rebuilt for the next submission, as those views also retire at commit.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_cpu_tex` walks 528 finalized descriptors twice in one submission and checks that both walks use the same textures without a second upload, then checks that the temporary references are cleared at commit.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+### A stage still bound to a program the game has finalized
+
+- **Symptom:** `CRASH sig=11 addr=0x100000703 pc=keys_hash+0x3c lr=prog_key+0x5c`, from `prog_get` ← `bind_stages` ← `mtl_exec`, about a minute into Assassin's Creed II's opening in the Animus (The Ezio Collection), with one `shader … is not in the shader map` line right before it; the player saw Desmond flicker before the crash.
+- **Cause:** the game binds programs for some stages only and finalizes the program another stage still holds, then reuses its memory. On NVN a bind takes the shaders' GPU state, so the stage goes on with them; the host kept only the program's pointer per stage (`S.bst`) and, at the next bind, read that object again for its shader keys: a control section pointer of `0xffffffff` from the reused memory.
+- **Fix:** each stage keeps the serial its program had at its bind (`S.bser`), and what the program resolved to is kept by that serial (`bring_put`, 64 entries); a stage whose object no longer has that serial takes its shaders from there (`stage_prog`, the log's `stage N keeps the shaders of a program the game has finalized`). `prog_get` reads no control section of an object that is no longer a program (finalized: its serial's program, else none, `[RED] a draw or dispatch uses a program the game has finalized`).
+- **Found on:** Assassin's Creed: The Ezio Collection (0100670014482000, a provisional profile), AC2.
 
 ### A replay's own objects take serials above a capture's
 
