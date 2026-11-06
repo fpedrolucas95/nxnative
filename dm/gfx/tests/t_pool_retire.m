@@ -26,15 +26,16 @@ int main(void) { @autoreleasepool {
     if (a == MAP_FAILED || b == MAP_FAILED || small == MAP_FAILED) return 1;
     int initial = g_npool;
     mtl_pool_add(a, na); mtl_pool_add(b, nb);
+    mtl_pool_buffer_addr(a, na); mtl_pool_buffer_addr(b, nb);   // buffer addresses taken in both: the raw table takes them whole
     id<MTLBuffer> first = lookup(a + 128, 4096);
     id<MTLBuffer> extended = lookup(a + 256, 160 * MB);
     id<MTLBuffer> far = lookup(a + 300 * MB, 64);
     id<MTLBuffer> other = lookup(b + 128, 64);
-    mtl_pool_add(small, ns); id<MTLBuffer> ordinary = lookup(small, 64);
+    mtl_pool_add(small, ns); mtl_pool_buffer_addr(small, ns); id<MTLBuffer> ordinary = lookup(small, 64);
     CHECK(first != extended, "the initial chunk was lengthened");
     CHECK([g_res_objects containsObject:first], "prior chunk stays resident until consolidation retires it");
     *(uint32_t *)(a + 128) = 0x1234abcd;
-    mtl_sub_begin(); CHECK(gmem_map_gpu() != 0, "raw-address map created");
+    mtl_sub_begin(); CHECK(gmem_map() != nil, "raw-address map created");
     CHECK(g_npool == initial + 3 && g_nbig == 2, "only whole mappings and ordinary pool remain");
     id<MTLBuffer> whole = lookup(a + 128, 4096);
     CHECK(whole.length == na && lookup(a + 300 * MB, 64) == whole, "all first-pool addresses share the whole mapping");

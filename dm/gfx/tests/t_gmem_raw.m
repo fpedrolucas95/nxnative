@@ -17,8 +17,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     const uint64_t MB = 1ull << 20;
     uint8_t *many = mmap(NULL, (size_t)MANY * 2 * PG, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0), *large = mmap(NULL, 64 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (many == MAP_FAILED || large == MAP_FAILED) abort();
-    for (int i = 0; i < MANY; i++) { uint8_t *p = many + (size_t)i * 2 * PG; mtl_pool_add(p, PG); uint32_t v = 0x10000u + (unsigned)i; memcpy(p + (size_t)(i * 8 % PG), &v, 4); }
-    mtl_pool_add(large, 64 * MB); { uint32_t v = 0xb16b00b5u; memcpy(large + 40 * MB + 12, &v, 4); }
+    for (int i = 0; i < MANY; i++) { uint8_t *p = many + (size_t)i * 2 * PG; mtl_pool_add(p, PG); mtl_pool_buffer_addr(p, PG); uint32_t v = 0x10000u + (unsigned)i; memcpy(p + (size_t)(i * 8 % PG), &v, 4); }
+    mtl_pool_add(large, 64 * MB); mtl_pool_buffer_addr(large, 64 * MB); { uint32_t v = 0xb16b00b5u; memcpy(large + 40 * MB + 12, &v, 4); }
     mtl_sub_begin(); id<MTLBuffer> map = gmem_map(); CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("the table holds more than the least count", gmem_entries(map) > DMSH_GMEM_MAP_ENTRIES);
     NSError *error = nil;

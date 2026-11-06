@@ -1,4 +1,4 @@
-// Raw global memory's pool table (nvn_mtl.m gmem_map_gpu) lists only the pools the game took a buffer address in (mtl_pool_buffer_addr: nvnMemoryPoolGetBufferAddress,
+// Raw global memory's pool table (nvn_mtl.m gmem_map) lists only the pools the game took a buffer address in (mtl_pool_buffer_addr: nvnMemoryPoolGetBufferAddress,
 // nvnBufferInitialize, nvnTextureGetTextureAddress), and only those come into the residency set for it. A pool holding only textures stays out of the table and out of the residency
 // set, through a pool walk's storage check (tex_storage_live) and a texture upload (up_big_src) too, and its texture still holds what the pool holds. DM_NVN_GMEM_ALL lists every pool.
 #include "../nvn/nvn_mtl.m"
@@ -10,7 +10,7 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 static void finish(void) { CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK("GPU has no submission error", !mtl_last_commit_error()); }
-static void table(void) { mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish(); }
+static void table(void) { mtl_sub_begin(); CHECK("pool table made", gmem_map() != nil); finish(); }
 static int listed(const void *mem) {   // an entry of the current table starts at mem
     const uint8_t *t = (const uint8_t *)g_gmem_buf.contents;
     for (size_t k = 1; k < g_gmem_buf.length / DMSH_GMEM_MAP_ENTRY; k++) { uint64_t lo; memcpy(&lo, t + k * DMSH_GMEM_MAP_ENTRY, 8); if (lo == ~0ull) break; if (lo == (uint64_t)(uintptr_t)mem) return 1; }

@@ -90,7 +90,7 @@ int main(void) { @autoreleasepool {
     free(lin);
     mtl_tex_release(&t);
     // Raw global memory: the table reaches all of it, and lookups then have the whole pool
-    mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
+    mtl_sub_begin(); CHECK("pool table made", gmem_map() != nil); finish();
     CHECK("no buffer address taken in the pool: the table does not take it whole", !g_big[0].full);
     mtl_pool_buffer_addr(mem, GB);   // nvnMemoryPoolGetBufferAddress
     mtl_sub_begin(); id<MTLBuffer> old_map = gmem_map(); CHECK("pool table made again", old_map != nil); finish();
@@ -123,7 +123,7 @@ int main(void) { @autoreleasepool {
     // More pools than DMSH_GMEM_MAP_ENTRIES (Ocarina of Time loads its save with up to about 4,500): each still has an entry, found through the hint or the search
     enum { MANY = 5000, PG = 16384 };
     uint8_t *many = mmap(NULL, (size_t)MANY * 2 * PG, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (many == MAP_FAILED) abort();
-    for (int i = 0; i < MANY; i++) mtl_pool_add(many + (size_t)i * 2 * PG, PG);   // a page apart: a range each
+    for (int i = 0; i < MANY; i++) { mtl_pool_add(many + (size_t)i * 2 * PG, PG); mtl_pool_buffer_addr(many + (size_t)i * 2 * PG, PG); }   // a page apart: a range each, a buffer address taken in each (the table lists only those)
     mtl_sub_begin(); id<MTLBuffer> map = gmem_map(); finish();
     unsigned cap = gmem_entries(map); const uint32_t *mw = map.contents;
     CHECK("the table grows to a power of two that holds every pool", cap >= MANY + 2 && !(cap & (cap - 1)) && cap < 2 * (MANY + 2) && mw[4] == cap);
